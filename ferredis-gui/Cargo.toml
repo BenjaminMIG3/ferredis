@@ -1,0 +1,19 @@
+[package]
+name = "ferredis-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ferredis desktop GUI"
+
+[[bin]]
+name = "ferredis-gui"
+path = "src/main.rs"
+
+[dependencies]
+ferredis-core = { workspace = true }
+eframe = { workspace = true, features = ["persistence"] }
+egui = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }

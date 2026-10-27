@@ -1,0 +1,18 @@
+[package]
+name = "ferredis-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ferredis Redis-compatible server"
+
+[[bin]]
+name = "ferredis-server"
+path = "src/main.rs"
+
+[dependencies]
+ferredis-core = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

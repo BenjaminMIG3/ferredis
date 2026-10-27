@@ -1,0 +1,17 @@
+[package]
+name = "ferredis-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ferredis interactive CLI (redis-cli compatible)"
+
+[[bin]]
+name = "ferredis-cli"
+path = "src/main.rs"
+
+[dependencies]
+ferredis-core = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }

@@ -1,0 +1,28 @@
+[package]
+name = "ferredis-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Redis-compatible in-memory store engine (RESP2/RESP3)"
+
+[dependencies]
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+mlua = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
