@@ -1,12 +1,14 @@
 //! Thème clair / sombre. Les couleurs sont lues à l'appel pour suivre le mode courant.
 
 use eframe::egui::{
-    self, epaint::Shadow, Color32, CornerRadius, FontFamily, FontId, Margin, RichText, Stroke,
-    TextStyle, Vec2,
+    self, epaint::Shadow, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
+    Margin, RichText, Stroke, TextStyle, Vec2,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 static DARK: AtomicBool = AtomicBool::new(true);
+static FONTS_READY: AtomicBool = AtomicBool::new(false);
 
 pub fn is_dark() -> bool {
     DARK.load(Ordering::Relaxed)
@@ -177,8 +179,79 @@ fn corner(r: u8) -> CornerRadius {
     CornerRadius::same(r)
 }
 
+/// Charge une police système couvrant l'accentué FR et les symboles UI (une seule fois).
+pub fn install_fonts(ctx: &egui::Context) {
+    if FONTS_READY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let mut fonts = FontDefinitions::default();
+    if let Some(data) = load_first_font(ui_font_candidates()) {
+        fonts
+            .font_data
+            .insert("system_ui".into(), Arc::new(FontData::from_owned(data)));
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+            family.insert(0, "system_ui".into());
+        }
+        // Secours pour les glyphes absents de la mono embarquée.
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
+            family.push("system_ui".into());
+        }
+    }
+    if let Some(data) = load_first_font(mono_font_candidates()) {
+        fonts
+            .font_data
+            .insert("system_mono".into(), Arc::new(FontData::from_owned(data)));
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
+            family.insert(0, "system_mono".into());
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn load_first_font(paths: &[&str]) -> Option<Vec<u8>> {
+    paths.iter().find_map(|p| std::fs::read(p).ok())
+}
+
+fn ui_font_candidates() -> &'static [&'static str] {
+    &[
+        #[cfg(windows)]
+        r"C:\Windows\Fonts\segoeui.ttf",
+        #[cfg(windows)]
+        r"C:\Windows\Fonts\arial.ttf",
+        #[cfg(windows)]
+        r"C:\Windows\Fonts\tahoma.ttf",
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        #[cfg(target_os = "macos")]
+        "/Library/Fonts/Arial.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+}
+
+fn mono_font_candidates() -> &'static [&'static str] {
+    &[
+        #[cfg(windows)]
+        r"C:\Windows\Fonts\consola.ttf",
+        #[cfg(windows)]
+        r"C:\Windows\Fonts\cour.ttf",
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    ]
+}
+
 /// Applique le thème courant (clair ou sombre) au contexte egui.
 pub fn apply(ctx: &egui::Context, dark: bool) {
+    install_fonts(ctx);
     set_dark(dark);
     use palette::*;
 

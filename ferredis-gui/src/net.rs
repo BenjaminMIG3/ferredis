@@ -87,8 +87,13 @@ pub struct KeyDetail {
 
 pub enum Request {
     /// Change de serveur cible (ferme la connexion courante).
-    Connect { host: String, port: u16 },
-    Snapshot { pattern: String },
+    Connect {
+        host: String,
+        port: u16,
+    },
+    Snapshot {
+        pattern: String,
+    },
     Exec(String),
     Inspect(String),
     Delete(String),
@@ -273,12 +278,23 @@ fn run_request(
 /// Commandes qui ne peuvent pas fonctionner sur la connexion partagée de la console.
 fn rejected_in_console(cmd: &str) -> Option<String> {
     const STREAMING: [&str; 5] = ["SUBSCRIBE", "PSUBSCRIBE", "MONITOR", "SYNC", "PSYNC"];
-    const BLOCKING: [&str; 6] = ["BLPOP", "BRPOP", "BZPOPMIN", "BZPOPMAX", "BRPOPLPUSH", "BLMOVE"];
+    const BLOCKING: [&str; 6] = [
+        "BLPOP",
+        "BRPOP",
+        "BZPOPMIN",
+        "BZPOPMAX",
+        "BRPOPLPUSH",
+        "BLMOVE",
+    ];
     let up = cmd.to_ascii_uppercase();
     if STREAMING.contains(&up.as_str()) {
-        Some(format!("{up} n'est pas disponible dans la console (utilise l'onglet Live)."))
+        Some(format!(
+            "{up} n'est pas disponible dans la console (utilise l'onglet Live)."
+        ))
     } else if BLOCKING.contains(&up.as_str()) {
-        Some(format!("{up} bloquerait l'interface : utilise ferredis-cli."))
+        Some(format!(
+            "{up} bloquerait l'interface : utilise ferredis-cli."
+        ))
     } else {
         None
     }
@@ -295,7 +311,9 @@ fn snapshot(c: &mut Conn, pattern: &str) -> Result<Snapshot, String> {
     ])?;
     let rtt = started.elapsed();
 
-    let info = as_text(&first[1]).map(|t| parse_info(&t)).unwrap_or_default();
+    let info = as_text(&first[1])
+        .map(|t| parse_info(&t))
+        .unwrap_or_default();
     let dbsize = match first[2] {
         RespValue::Integer(n) => n,
         _ => 0,
@@ -306,7 +324,11 @@ fn snapshot(c: &mut Conn, pattern: &str) -> Result<Snapshot, String> {
     let events = parse_events(&first[4]);
 
     // Parcours SCAN jusqu'à la limite.
-    let pattern = if pattern.trim().is_empty() { "*" } else { pattern.trim() };
+    let pattern = if pattern.trim().is_empty() {
+        "*"
+    } else {
+        pattern.trim()
+    };
     let mut names: Vec<String> = Vec::new();
     let mut cursor = "0".to_string();
     let mut truncated = false;
@@ -340,7 +362,11 @@ fn snapshot(c: &mut Conn, pattern: &str) -> Result<Snapshot, String> {
         cmds.push(vec!["TYPE".to_string(), n.clone()]);
         cmds.push(vec!["TTL".to_string(), n.clone()]);
     }
-    let replies = if cmds.is_empty() { Vec::new() } else { c.pipeline(&cmds)? };
+    let replies = if cmds.is_empty() {
+        Vec::new()
+    } else {
+        c.pipeline(&cmds)?
+    };
     let keys = names
         .into_iter()
         .zip(replies.chunks(2))
@@ -381,8 +407,14 @@ fn inspect(c: &mut Conn, key: &str) -> Result<KeyDetail, String> {
         "list" => (vec!["LLEN", &k], vec!["LRANGE", &k, "0", "199"]),
         "hash" => (vec!["HLEN", &k], vec!["HSCAN", &k, "0", "COUNT", "200"]),
         "set" => (vec!["SCARD", &k], vec!["SSCAN", &k, "0", "COUNT", "200"]),
-        "zset" => (vec!["ZCARD", &k], vec!["ZRANGE", &k, "0", "199", "WITHSCORES"]),
-        "stream" => (vec!["XLEN", &k], vec!["XRANGE", &k, "-", "+", "COUNT", "100"]),
+        "zset" => (
+            vec!["ZCARD", &k],
+            vec!["ZRANGE", &k, "0", "199", "WITHSCORES"],
+        ),
+        "stream" => (
+            vec!["XLEN", &k],
+            vec!["XRANGE", &k, "-", "+", "COUNT", "100"],
+        ),
         _ => {
             return Ok(KeyDetail {
                 key: k,
@@ -541,7 +573,7 @@ fn live_session(
     let _ = conn.call(&["CONFIG", "SET", "notify-keyspace-events", "AKE"]);
     let ack = conn.call(&["PSUBSCRIBE", "__keyevent@*__:*"])?;
     if let RespValue::Error(e) = ack {
-        return Err(String::from_utf8_lossy(&e).into_owned());
+        return Err(crate::textutil::from_redis_bytes(&e));
     }
     feed.set_status("abonné aux événements");
     ctx.request_repaint();
@@ -619,7 +651,7 @@ pub fn human_duration(secs: u64) -> String {
 fn as_text(v: &RespValue) -> Option<String> {
     match v {
         RespValue::BulkString(Some(b)) | RespValue::SimpleString(b) => {
-            Some(String::from_utf8_lossy(b).into_owned())
+            Some(crate::textutil::from_redis_bytes(b))
         }
         RespValue::Integer(n) => Some(n.to_string()),
         _ => None,
@@ -638,7 +670,9 @@ fn parse_client_line(line: &str) -> Option<ClientRow> {
     let mut row = ClientRow::default();
     let mut any = false;
     for part in line.split_whitespace() {
-        let Some((k, v)) = part.split_once('=') else { continue };
+        let Some((k, v)) = part.split_once('=') else {
+            continue;
+        };
         any = true;
         match k {
             "id" => row.id = v.into(),
@@ -662,7 +696,9 @@ fn parse_events(v: &RespValue) -> Vec<EventRow> {
     items
         .iter()
         .filter_map(|e| {
-            let RespValue::Array(Some(f)) = e else { return None };
+            let RespValue::Array(Some(f)) = e else {
+                return None;
+            };
             if f.len() < 5 {
                 return None;
             }
@@ -732,17 +768,18 @@ pub fn render(v: &RespValue) -> String {
 }
 
 fn render_into(v: &RespValue, indent: usize, out: &mut String) {
+    use crate::textutil::from_redis_bytes;
     match v {
-        RespValue::SimpleString(b) => out.push_str(&String::from_utf8_lossy(b)),
+        RespValue::SimpleString(b) => out.push_str(&from_redis_bytes(b)),
         RespValue::Error(b) => {
             out.push_str("(error) ");
-            out.push_str(&String::from_utf8_lossy(b));
+            out.push_str(&from_redis_bytes(b));
         }
         RespValue::Integer(n) => out.push_str(&format!("(integer) {n}")),
         RespValue::BulkString(None) | RespValue::Array(None) => out.push_str("(nil)"),
         RespValue::BulkString(Some(b)) => {
             out.push('"');
-            out.push_str(&String::from_utf8_lossy(b).replace('\n', "\\n"));
+            out.push_str(&from_redis_bytes(b).replace('\n', "\\n"));
             out.push('"');
         }
         RespValue::Array(Some(items)) if items.is_empty() => out.push_str("(empty array)"),
@@ -763,13 +800,13 @@ fn render_into(v: &RespValue, indent: usize, out: &mut String) {
         RespValue::Double(n) => out.push_str(&format!("(double) {n}")),
         RespValue::BigNumber(b) => {
             out.push_str("(big number) ");
-            out.push_str(&String::from_utf8_lossy(b));
+            out.push_str(&from_redis_bytes(b));
         }
         RespValue::Verbatim { format, data } => {
             out.push_str(&format!(
                 "(verbatim) {}:{}",
-                String::from_utf8_lossy(format),
-                String::from_utf8_lossy(data)
+                from_redis_bytes(format),
+                from_redis_bytes(data)
             ));
         }
         RespValue::Map(entries) => {
@@ -817,8 +854,12 @@ mod tests {
 
     #[test]
     fn client_line_parsing() {
-        let row = parse_client_line("id=3 addr=127.0.0.1:5000 name=web age=12 idle=1 db=0 cmd=get").unwrap();
-        assert_eq!((row.id.as_str(), row.name.as_str(), row.age), ("3", "web", 12));
+        let row = parse_client_line("id=3 addr=127.0.0.1:5000 name=web age=12 idle=1 db=0 cmd=get")
+            .unwrap();
+        assert_eq!(
+            (row.id.as_str(), row.name.as_str(), row.age),
+            ("3", "web", 12)
+        );
     }
 
     #[test]
@@ -837,6 +878,9 @@ mod tests {
             RespValue::bulk("foo"),
         ]));
         let ev = live_event(&msg).unwrap();
-        assert_eq!((ev.db.as_str(), ev.event.as_str(), ev.key.as_str()), ("0", "set", "foo"));
+        assert_eq!(
+            (ev.db.as_str(), ev.event.as_str(), ev.key.as_str()),
+            ("0", "set", "foo")
+        );
     }
 }

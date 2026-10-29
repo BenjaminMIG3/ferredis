@@ -25,7 +25,12 @@ fn body(text: impl Into<String>) -> RichText {
 fn empty_state(ui: &mut egui::Ui, title: &str, hint: &str) {
     ui.add_space(48.0);
     ui.vertical_centered(|ui| {
-        ui.label(RichText::new(title).size(17.0).strong().color(palette::text()));
+        ui.label(
+            RichText::new(title)
+                .size(17.0)
+                .strong()
+                .color(palette::text()),
+        );
         ui.add_space(4.0);
         ui.label(muted(hint));
     });
@@ -42,25 +47,14 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
 
 fn format_ttl(ttl: i64) -> String {
     match ttl {
-        -1 => "∞".into(),
-        t if t < 0 => "—".into(),
+        -1 => "inf".into(),
+        t if t < 0 => "-".into(),
         t => human_duration(t as u64),
     }
 }
 
 fn format_count(n: &str) -> String {
-    let digits: Vec<char> = n.chars().collect();
-    if digits.iter().any(|c| !c.is_ascii_digit()) {
-        return n.to_string();
-    }
-    let mut out = String::new();
-    for (i, c) in digits.iter().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push('\u{202f}');
-        }
-        out.push(*c);
-    }
-    out
+    crate::textutil::format_thousands(n)
 }
 
 // ───────────────────────────── Cadre global ─────────────────────────────
@@ -94,11 +88,17 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 } else {
                     theme::badge(ui, "déconnecté", palette::err());
                 }
+                let local_running = app.server.is_running();
+                if local_running {
+                    theme::badge(ui, "serveur local", palette::info());
+                }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add(theme::primary_button("Connecter")).clicked() {
                         app.reconnect();
                     }
+
+                    server_controls(app, ui);
 
                     let theme_label = if app.dark { "Clair" } else { "Sombre" };
                     if ui
@@ -134,6 +134,38 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
         });
 }
 
+/// Contrôles start/stop/restart du process local (redémarrage simple si le port change).
+fn server_controls(app: &mut App, ui: &mut egui::Ui) {
+    let running = app.server.is_running();
+    let needs_restart = app.server_needs_restart();
+
+    if needs_restart {
+        if ui
+            .add(theme::ghost_button("Redémarrer"))
+            .on_hover_text("Applique hôte/port en redémarrant le serveur local")
+            .clicked()
+        {
+            app.restart_server();
+        }
+    }
+
+    if running {
+        if ui
+            .add(theme::ghost_button("Arrêter"))
+            .on_hover_text("Arrête le ferredis-server lancé par le GUI")
+            .clicked()
+        {
+            app.stop_server();
+        }
+    } else if ui
+        .add(theme::ghost_button("Démarrer"))
+        .on_hover_text("Lance ferredis-server sur l'hôte/port courants")
+        .clicked()
+    {
+        app.start_server();
+    }
+}
+
 pub fn status_bar(app: &mut App, ctx: &egui::Context) {
     egui::TopBottomPanel::bottom("status")
         .exact_height(36.0)
@@ -146,7 +178,7 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
             ui.horizontal_centered(|ui| {
                 match (&app.error, &app.snapshot) {
                     (Some(e), _) => {
-                        ui.label(RichText::new(format!("⚠ {e}")).color(palette::err()));
+                        ui.label(RichText::new(format!("! {e}")).color(palette::err()));
                     }
                     (None, Some(s)) => {
                         let version = s.info("redis_version").unwrap_or("?");
@@ -160,7 +192,7 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                         )));
                     }
                     _ => {
-                        ui.label(muted("Connexion en cours…"));
+                        ui.label(muted("Connexion en cours..."));
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -218,17 +250,21 @@ pub fn overview(app: &mut App, ui: &mut egui::Ui) {
     let Some(s) = &app.snapshot else {
         return empty_state(
             ui,
-            "En attente du serveur…",
+            "En attente du serveur...",
             "Vérifie l'hôte et le port, puis clique sur Connecter.",
         );
     };
 
-    let get = |k: &str| s.info(k).unwrap_or("—").to_string();
+    let get = |k: &str| {
+        s.info(k)
+            .unwrap_or(crate::textutil::MISSING)
+            .to_string()
+    };
     let uptime = s
         .info("uptime_in_seconds")
         .and_then(|v| v.parse().ok())
         .map(human_duration)
-        .unwrap_or_else(|| "—".into());
+        .unwrap_or_else(|| crate::textutil::MISSING.into());
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -384,7 +420,7 @@ pub fn keys(app: &mut App, ui: &mut egui::Ui) {
                 .map_or((0, false), |s| (s.keys.len(), s.truncated));
             ui.add_space(4.0);
             ui.label(muted(if truncated {
-                format!("{count} clés affichées (limite {KEY_LIMIT}) — affine le filtre")
+                format!("{count} clés affichées (limite {KEY_LIMIT}) - affine le filtre")
             } else {
                 format!("{count} clé(s)")
             }));
@@ -414,9 +450,8 @@ pub fn keys(app: &mut App, ui: &mut egui::Ui) {
                                 ui.horizontal(|ui| {
                                     ui.set_min_height(24.0);
                                     theme::badge(ui, &row.ty, theme::type_color(&row.ty));
-                                    let name = RichText::new(&row.name)
-                                        .monospace()
-                                        .color(palette::text());
+                                    let name =
+                                        RichText::new(&row.name).monospace().color(palette::text());
                                     if ui.selectable_label(selected, name).clicked() {
                                         to_inspect = Some(row.name.clone());
                                     }
@@ -453,7 +488,7 @@ fn detail_panel(app: &mut App, ui: &mut egui::Ui) {
         return empty_state(ui, "Sélectionne une clé", "Son contenu s'affichera ici.");
     };
     let Some(d) = app.detail.clone().filter(|d| d.key == key) else {
-        ui.label(muted("Chargement…"));
+        ui.label(muted("Chargement..."));
         return;
     };
 
@@ -599,19 +634,14 @@ pub fn clients(app: &mut App, ui: &mut egui::Ui) {
                             "Dernière cmd",
                             "",
                         ] {
-                            ui.label(
-                                RichText::new(h)
-                                    .small()
-                                    .strong()
-                                    .color(palette::muted()),
-                            );
+                            ui.label(RichText::new(h).small().strong().color(palette::muted()));
                         }
                         ui.end_row();
                         for c in &s.clients {
                             let is_gui = c.name.starts_with("ferredis-gui");
                             ui.label(RichText::new(&c.id).monospace().color(palette::text()));
                             if c.name.is_empty() {
-                                ui.label(muted("—"));
+                                ui.label(muted(crate::textutil::MISSING));
                             } else {
                                 ui.label(RichText::new(&c.name).color(if is_gui {
                                     palette::accent()
@@ -689,12 +719,7 @@ pub fn connections(app: &mut App, ui: &mut egui::Ui) {
                     .spacing([20.0, 10.0])
                     .show(ui, |ui| {
                         for h in ["Heure (UTC)", "Type", "Client", "Adresse", "Détail"] {
-                            ui.label(
-                                RichText::new(h)
-                                    .small()
-                                    .strong()
-                                    .color(palette::muted()),
-                            );
+                            ui.label(RichText::new(h).small().strong().color(palette::muted()));
                         }
                         ui.end_row();
                         for e in rows {
@@ -708,7 +733,7 @@ pub fn connections(app: &mut App, ui: &mut egui::Ui) {
                                 RichText::new(if e.client_id > 0 {
                                     e.client_id.to_string()
                                 } else {
-                                    "—".into()
+                                    crate::textutil::MISSING.into()
                                 })
                                 .monospace()
                                 .color(palette::text()),
@@ -775,7 +800,7 @@ pub fn console(app: &mut App, ui: &mut egui::Ui) {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut app.console_input)
                     .font(egui::TextStyle::Monospace)
-                    .hint_text("Commande…")
+                    .hint_text("Commande...")
                     .desired_width(ui.available_width() - 100.0)
                     .text_color(palette::text())
                     .frame(false),
@@ -858,12 +883,7 @@ pub fn live(app: &mut App, ui: &mut egui::Ui) {
                     .spacing([20.0, 8.0])
                     .show(ui, |ui| {
                         for h in ["Heure", "DB", "Événement", "Clé"] {
-                            ui.label(
-                                RichText::new(h)
-                                    .small()
-                                    .strong()
-                                    .color(palette::muted()),
-                            );
+                            ui.label(RichText::new(h).small().strong().color(palette::muted()));
                         }
                         ui.end_row();
                         for e in events {
@@ -894,7 +914,7 @@ fn info_kv(ui: &mut egui::Ui, s: &crate::net::Snapshot, keys: &[&str]) {
             for k in keys {
                 ui.label(RichText::new(*k).monospace().color(palette::muted()));
                 ui.label(
-                    RichText::new(s.info(k).unwrap_or("—"))
+                    RichText::new(s.info(k).unwrap_or(crate::textutil::MISSING))
                         .monospace()
                         .color(palette::text()),
                 );
@@ -963,7 +983,15 @@ pub fn acl(app: &mut App, ui: &mut egui::Ui) {
     theme::card().show(ui, |ui| {
         ui.label(RichText::new("ACL").strong().size(16.0));
         ui.add_space(8.0);
-        info_kv(ui, s, &["acl_access_denied_auth", "acl_access_denied_cmd", "acl_access_denied_key"]);
+        info_kv(
+            ui,
+            s,
+            &[
+                "acl_access_denied_auth",
+                "acl_access_denied_cmd",
+                "acl_access_denied_key",
+            ],
+        );
         ui.add_space(8.0);
         ui.label(
             RichText::new("Console : ACL LIST / ACL USERS / ACL WHOAMI / ACL GETUSER")

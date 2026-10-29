@@ -5,12 +5,15 @@
 //! - `views`  : rendu de chaque onglet
 
 mod net;
+mod process;
+mod textutil;
 mod theme;
 mod views;
 
 use clap::Parser;
 use eframe::egui;
 use net::{spawn_live, spawn_worker, Backend, KeyDetail, LiveFeed, Reply, Request, Snapshot};
+use process::{ManagedServer, ServerSpec};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -139,6 +142,9 @@ pub struct App {
 
     pub toast: Option<Toast>,
     pub dark: bool,
+
+    /// Serveur local dont le GUI possède le cycle de vie (start/stop/restart).
+    pub server: ManagedServer,
 }
 
 impl App {
@@ -172,9 +178,54 @@ impl App {
             live_handle: None,
             toast: None,
             dark,
+            server: ManagedServer::default(),
         };
         app.restart_live();
         app
+    }
+
+    /// Spec d'écoute dérivée des champs hôte/port de l'UI (source unique).
+    pub fn desired_spec(&self) -> ServerSpec {
+        ServerSpec {
+            bind: self.host.trim().to_string(),
+            port: self.port,
+        }
+    }
+
+    /// Serveur géré actif avec une spec différente de l'UI (ex. port modifié).
+    pub fn server_needs_restart(&mut self) -> bool {
+        let desired = self.desired_spec();
+        self.server.is_running() && self.server.running_spec().is_some_and(|s| s != &desired)
+    }
+
+    fn run_server_op(
+        &mut self,
+        op: impl FnOnce(&mut ManagedServer, ServerSpec) -> Result<(), String>,
+        ok: &str,
+        reconnect: bool,
+    ) {
+        let spec = self.desired_spec();
+        match op(&mut self.server, spec) {
+            Ok(()) => {
+                self.notify(ok, false);
+                if reconnect {
+                    self.reconnect();
+                }
+            }
+            Err(e) => self.notify(e, true),
+        }
+    }
+
+    pub fn start_server(&mut self) {
+        self.run_server_op(ManagedServer::start, "Serveur démarré", true);
+    }
+
+    pub fn stop_server(&mut self) {
+        self.run_server_op(|s, _| s.stop(), "Serveur arrêté", false);
+    }
+
+    pub fn restart_server(&mut self) {
+        self.run_server_op(ManagedServer::restart, "Serveur redémarré", true);
     }
 
     // ───────────── Requêtes ─────────────
@@ -333,6 +384,9 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.stop_live();
+        // Arrêt gracieux (SHUTDOWN) avant la fin du process ; le Job Windows
+        // reste un filet de sécurité si le GUI est tué sans passer par Drop.
+        let _ = self.server.stop();
     }
 }
 
