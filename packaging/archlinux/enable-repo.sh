@@ -10,7 +10,7 @@ CONF=/etc/pacman.d/ferredis.conf
 cat > "$CONF" <<'EOF'
 [ferredis]
 SigLevel = Optional TrustAll
-Server = https://benjamindusunceli.github.io/ferredis/archlinux/$arch
+Server = https://benjaminmig3.github.io/ferredis/archlinux/$arch
 EOF
 
 if ! grep -q 'Include = /etc/pacman.d/ferredis.conf' /etc/pacman.conf; then

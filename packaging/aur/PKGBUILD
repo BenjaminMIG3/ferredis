@@ -1,4 +1,4 @@
-# Maintainer: Ferredis Contributors <https://github.com/BenjaminDUSUNCELI/ferredis>
+# Maintainer: Ferredis Contributors <https://github.com/BenjaminMIG3/ferredis>
 # Paquet AUR (source) — publication : https://wiki.archlinux.org/title/AUR_submission_guidelines
 #
 # Install via AUR helper :
@@ -10,7 +10,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Redis-compatible in-memory server written in Rust (server, CLI, GUI)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/BenjaminDUSUNCELI/ferredis"
+url="https://github.com/BenjaminMIG3/ferredis"
 license=('MIT')
 depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libxcb')
 makedepends=('cargo' 'rust' 'clang' 'pkgconf')

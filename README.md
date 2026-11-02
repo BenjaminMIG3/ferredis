@@ -8,14 +8,14 @@ Compatible Linux et Windows.
 
 | Plateforme | Lien |
 |---|---|
-| **Releases GitHub** | [Releases](https://github.com/BenjaminDUSUNCELI/ferredis/releases) (Linux `.tar.gz`, Windows `.zip`, Arch `.pkg.tar.zst`) |
-| **Site artefacts / dépôt pacman** | [GitHub Pages](https://benjamindusunceli.github.io/ferredis/) |
+| **Releases GitHub** | [Releases](https://github.com/BenjaminMIG3/ferredis/releases) (Linux `.tar.gz`, Windows `.zip`, Arch `.pkg.tar.zst`) |
+| **Site artefacts / dépôt pacman** | [GitHub Pages](https://benjaminmig3.github.io/ferredis/) |
 
 ### Arch Linux — `pacman -S ferredis`
 
 ```bash
 # 1) Activer le dépôt binaire (une fois)
-curl -fsSL https://raw.githubusercontent.com/BenjaminDUSUNCELI/ferredis/main/packaging/archlinux/enable-repo.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/BenjaminMIG3/ferredis/main/packaging/archlinux/enable-repo.sh | sudo bash
 # 2) Installer / mettre à jour
 sudo pacman -Syu ferredis
 sudo systemctl enable --now ferredis

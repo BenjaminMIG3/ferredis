@@ -2,7 +2,7 @@ pkgbase = ferredis
 	pkgdesc = Redis-compatible in-memory server written in Rust (server, CLI, GUI)
 	pkgver = 0.1.0
 	pkgrel = 1
-	url = https://github.com/BenjaminDUSUNCELI/ferredis
+	url = https://github.com/BenjaminMIG3/ferredis
 	install = ferredis.install
 	arch = x86_64
 	arch = aarch64
@@ -20,7 +20,7 @@ pkgbase = ferredis
 	provides = ferredis-gui
 	options = !lto
 	backup = etc/ferredis/ferredis.conf
-	source = ferredis-0.1.0.tar.gz::https://github.com/BenjaminDUSUNCELI/ferredis/archive/refs/tags/v0.1.0.tar.gz
+	source = ferredis-0.1.0.tar.gz::https://github.com/BenjaminMIG3/ferredis/archive/refs/tags/v0.1.0.tar.gz
 	sha256sums = SKIP
 
 pkgname = ferredis
