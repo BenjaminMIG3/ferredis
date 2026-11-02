@@ -8,9 +8,24 @@ Compatible Linux et Windows.
 
 | Plateforme | Lien |
 |---|---|
-| **Releases GitHub** | [Releases](https://github.com/BenjaminMIG3/ferredis/releases) (Linux `.tar.gz`, Windows `.zip`, Arch `.pkg.tar.zst`) |
-| **Site artefacts / dépôt pacman** | [GitHub Pages](https://benjaminmig3.github.io/ferredis/) |
+| **Releases GitHub** | [Releases](https://github.com/BenjaminMIG3/ferredis/releases) (Linux `.tar.gz` / `.deb`, Windows `.zip`, Arch `.pkg.tar.zst`) |
+| **Site artefacts / dépôts** | [GitHub Pages](https://benjaminmig3.github.io/ferredis/) (apt + pacman) |
 | **Windows (Scoop)** | `scoop bucket add ferredis https://github.com/BenjaminMIG3/ferredis` puis `scoop install ferredis` |
+
+### Ubuntu / Debian — `apt install ferredis`
+
+```bash
+# 1) Activer le dépôt (une fois)
+curl -fsSL https://raw.githubusercontent.com/BenjaminMIG3/ferredis/main/packaging/debian/enable-repo.sh | sudo bash
+# 2) Installer
+sudo apt-get install -y ferredis
+sudo systemctl enable --now ferredis
+ferredis-cli PING
+```
+
+Ou manuellement : copier [`packaging/debian/ferredis.list`](packaging/debian/ferredis.list) vers `/etc/apt/sources.list.d/ferredis.list`, puis `sudo apt-get update && sudo apt-get install ferredis`.
+
+Sans dépôt : télécharger le `.deb` depuis les [Releases](https://github.com/BenjaminMIG3/ferredis/releases) puis `sudo apt-get install -y ./ferredis_*_amd64.deb`.
 
 ### Arch Linux — `pacman -S ferredis`
 

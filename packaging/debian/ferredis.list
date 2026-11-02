@@ -1,0 +1,3 @@
+# Inclure via /etc/apt/sources.list.d/ferredis.list
+# Puis : sudo apt-get update && sudo apt-get install ferredis
+deb [arch=amd64 trusted=yes] https://benjaminmig3.github.io/ferredis/apt stable main

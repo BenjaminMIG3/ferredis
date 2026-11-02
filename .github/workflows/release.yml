@@ -18,17 +18,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: System deps (egui)
+      - name: System deps (egui + deb/apt)
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+            libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            dpkg-dev apt-utils
       - name: Package tarball
         run: bash packaging/package.sh
+      - name: Package .deb + dépôt apt
+        run: |
+          bash packaging/debian/package-deb.sh
+          bash packaging/debian/build-repo.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ferredis-linux-x86_64
-          path: dist/ferredis-linux-x86_64.tar.gz
+          path: |
+            dist/ferredis-linux-x86_64.tar.gz
+            dist/ferredis_*.deb
+            dist/apt/**
 
   package-windows:
     runs-on: windows-latest
@@ -78,9 +86,10 @@ jobs:
           path: artifacts
       - name: Assemble dist/
         run: |
-          mkdir -p dist/archlinux/x86_64
+          mkdir -p dist/archlinux/x86_64 dist/apt
           find artifacts -type f -name 'ferredis-linux-*.tar.gz' -exec cp -f {} dist/ \;
           find artifacts -type f -name 'ferredis-windows-*.zip' -exec cp -f {} dist/ \;
+          find artifacts -type f -name 'ferredis_*.deb' -exec cp -f {} dist/ \;
           find artifacts -type f \( -name '*.pkg.tar.zst' -o -name '*.pkg.tar.xz' \) -exec cp -f {} dist/ \;
           find artifacts -type f -name 'PKGBUILD' -exec cp -f {} dist/ \;
           if [ -d artifacts/ferredis-archlinux/archlinux ]; then
@@ -88,6 +97,13 @@ jobs:
           else
             find artifacts -type d -name x86_64 | head -1 | while read -r d; do
               cp -a "$d"/. dist/archlinux/x86_64/ || true
+            done
+          fi
+          if [ -d artifacts/ferredis-linux-x86_64/apt ]; then
+            cp -a artifacts/ferredis-linux-x86_64/apt/. dist/apt/
+          else
+            find artifacts -type d -path '*/apt/dists' | head -1 | while read -r d; do
+              cp -a "$(dirname "$d")"/. dist/apt/ || true
             done
           fi
           ls -laR dist/
@@ -98,6 +114,7 @@ jobs:
           files: |
             dist/ferredis-linux-x86_64.tar.gz
             dist/ferredis-windows-x86_64.zip
+            dist/ferredis_*.deb
             dist/*.pkg.tar.zst
             dist/*.pkg.tar.xz
             dist/PKGBUILD

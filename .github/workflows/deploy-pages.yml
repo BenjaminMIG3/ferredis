@@ -40,9 +40,10 @@ jobs:
       - name: Assemble dist/
         run: |
           set -euo pipefail
-          mkdir -p dist/archlinux/x86_64
+          mkdir -p dist/archlinux/x86_64 dist/apt
           find artifacts -type f -name 'ferredis-linux-*.tar.gz' -exec cp -f {} dist/ \;
           find artifacts -type f -name 'ferredis-windows-*.zip' -exec cp -f {} dist/ \;
+          find artifacts -type f -name 'ferredis_*.deb' -exec cp -f {} dist/ \;
           find artifacts -type f \( -name '*.pkg.tar.zst' -o -name '*.pkg.tar.xz' \) -exec cp -f {} dist/ \;
           find artifacts -type f -name 'PKGBUILD' -exec cp -f {} dist/ \;
           if [ -d artifacts/ferredis-archlinux/archlinux ]; then
@@ -50,6 +51,15 @@ jobs:
           else
             find artifacts -type d -name x86_64 | head -1 | while read -r d; do
               cp -a "$d"/. dist/archlinux/x86_64/ || true
+            done
+          fi
+          if [ -d artifacts/ferredis-linux-x86_64/apt ]; then
+            cp -a artifacts/ferredis-linux-x86_64/apt/. dist/apt/
+          elif [ -d artifacts/ferredis-pages-dist/apt ]; then
+            cp -a artifacts/ferredis-pages-dist/apt/. dist/apt/
+          else
+            find artifacts -type d -path '*/apt/dists' | head -1 | while read -r d; do
+              cp -a "$(dirname "$d")"/. dist/apt/ || true
             done
           fi
           cat > dist/index.html << 'HTML'
@@ -60,14 +70,17 @@ jobs:
           <ul>
             <li><a href="ferredis-linux-x86_64.tar.gz">Linux x86_64 (tarball + systemd)</a></li>
             <li><a href="ferredis-windows-x86_64.zip">Windows x86_64 (zip + service)</a></li>
+            <li><a href="apt/">Dépôt apt (Ubuntu/Debian)</a></li>
             <li><a href="archlinux/x86_64/">Dépôt pacman Arch (x86_64)</a></li>
           </ul>
+          <p>Ubuntu/Debian : <code>curl -fsSL …/enable-repo.sh | sudo bash && sudo apt-get install ferredis</code></p>
           <p>Arch : ajoutez le dépôt puis <code>sudo pacman -Syu ferredis</code> — voir README.</p>
           </body></html>
           HTML
           ls -laR dist/
           test -f dist/ferredis-linux-x86_64.tar.gz
           test -f dist/ferredis-windows-x86_64.zip
+          test -d dist/apt/dists
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
