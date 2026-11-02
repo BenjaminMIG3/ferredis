@@ -6,5 +6,8 @@ Cargo.lock
 *.pdb
 .DS_Store
 *.rdb
+*.aof
+ferredis-cold/
+**/ferredis-cold/
 .env
 .env.*
