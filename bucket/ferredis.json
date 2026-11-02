@@ -1,41 +1,41 @@
 {
-  "version": "0.1.0",
-  "description": "Serveur compatible Redis Open Source 8.0, écrit en Rust (RESP, RDB/AOF, réplication, Cluster, extensions Stack).",
-  "homepage": "https://github.com/BenjaminMIG3/ferredis",
-  "license": "MIT",
-  "architecture": {
-    "64bit": {
-      "url": "https://github.com/BenjaminMIG3/ferredis/releases/download/v0.1.0/ferredis-windows-x86_64.zip",
-      "hash": "be3f536fdfcc5c3eae1ed5ff9a6bf465b4ea038bb1de2e810295819cecf88579"
-    }
-  },
-  "bin": [
-    "ferredis-server.exe",
-    "ferredis-cli.exe",
-    "ferredis-gui.exe"
-  ],
-  "shortcuts": [
-    [
-      "ferredis-gui.exe",
-      "Ferredis GUI"
-    ]
-  ],
-  "persist": [
-    "ferredis.conf"
-  ],
-  "notes": [
-    "Démarrer : ferredis-server",
-    "CLI : ferredis-cli PING",
-    "Service Windows (Admin) : install-service.ps1 -Start"
-  ],
-  "checkver": {
-    "github": "https://github.com/BenjaminMIG3/ferredis"
-  },
-  "autoupdate": {
+    "version": "0.1.0",
+    "description": "Serveur compatible Redis Open Source 8.0, écrit en Rust (RESP, RDB/AOF, réplication, Cluster, extensions Stack).",
+    "homepage": "https://github.com/BenjaminMIG3/ferredis",
+    "license": "MIT",
     "architecture": {
-      "64bit": {
-        "url": "https://github.com/BenjaminMIG3/ferredis/releases/download/v$version/ferredis-windows-x86_64.zip"
-      }
+        "64bit": {
+            "url": "https://github.com/BenjaminMIG3/ferredis/releases/download/v0.1.0/ferredis-windows-x86_64.zip",
+            "hash": "f2e05579886f67ee2341f4d4ed48321eca2a7ea8fef8b475ab83895da1955120"
+        }
+    },
+    "bin": [
+        "ferredis-server.exe",
+        "ferredis-cli.exe",
+        "ferredis-gui.exe"
+    ],
+    "shortcuts": [
+        [
+            "ferredis-gui.exe",
+            "Ferredis GUI"
+        ]
+    ],
+    "persist": [
+        "ferredis.conf"
+    ],
+    "notes": [
+        "Démarrer : ferredis-server",
+        "CLI : ferredis-cli PING",
+        "Service Windows (Admin) : install-service.ps1 -Start"
+    ],
+    "checkver": {
+        "github": "https://github.com/BenjaminMIG3/ferredis"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/BenjaminMIG3/ferredis/releases/download/v$version/ferredis-windows-x86_64.zip"
+            }
+        }
     }
-  }
 }
