@@ -4,6 +4,46 @@ Serveur compatible Redis Open Source **8.0**, écrit en Rust. Parité protocole 
 
 Compatible Linux et Windows.
 
+## Téléchargement
+
+| Plateforme | Lien |
+|---|---|
+| **Releases GitHub** | [Releases](https://github.com/BenjaminDUSUNCELI/ferredis/releases) (Linux `.tar.gz`, Windows `.zip`, Arch `.pkg.tar.zst`) |
+| **Site artefacts / dépôt pacman** | [GitHub Pages](https://benjamindusunceli.github.io/ferredis/) |
+
+### Arch Linux — `pacman -S ferredis`
+
+```bash
+# 1) Activer le dépôt binaire (une fois)
+curl -fsSL https://raw.githubusercontent.com/BenjaminDUSUNCELI/ferredis/main/packaging/archlinux/enable-repo.sh | sudo bash
+# 2) Installer / mettre à jour
+sudo pacman -Syu ferredis
+sudo systemctl enable --now ferredis
+```
+
+Ou manuellement : copier [`packaging/archlinux/pacman-ferredis.conf`](packaging/archlinux/pacman-ferredis.conf) vers `/etc/pacman.d/ferredis.conf` et `Include` dans `/etc/pacman.conf`.
+
+**AUR** (après publication) : `yay -S ferredis` / `paru -S ferredis` — sources dans `packaging/aur/`.
+
+### Linux (toutes distros systemd)
+
+```bash
+# Depuis une release : ferredis-linux-x86_64.tar.gz
+tar xzf ferredis-linux-x86_64.tar.gz
+sudo ./install.sh --from-dir . --enable --start
+sudo systemctl status ferredis
+```
+
+### Windows
+
+```powershell
+# Depuis ferredis-windows-x86_64.zip (PowerShell Admin)
+.\install-service.ps1 -Start
+Get-Service Ferredis
+```
+
+Publier une release : `git tag v0.1.0 && git push origin v0.1.0` (workflow `release` + GitHub Pages).
+
 ## Crates
 
 | Crate | Rôle |
@@ -28,18 +68,12 @@ cargo build --release -p ferredis-gui   # optionnel
 ## Démarrage rapide
 
 ```bash
-# Serveur (port 6379 par défaut)
 cargo run -p ferredis-server -- --bind 127.0.0.1 --port 6379
-
-# CLI
 cargo run -p ferredis-cli -- -p 6379 PING
-cargo run -p ferredis-cli -- -p 6379   # mode interactif
-
-# GUI
 cargo run -p ferredis-gui
 ```
 
-Clients Redis standards (`redis-cli`, `redis-py`, etc.) fonctionnent via `REDIS_URL=redis://127.0.0.1:6379`.
+Clients Redis standards : `REDIS_URL=redis://127.0.0.1:6379`.
 
 ### Options serveur utiles
 
@@ -61,17 +95,15 @@ Clients Redis standards (`redis-cli`, `redis-py`, etc.) fonctionnent via `REDIS_
 cargo test --workspace --exclude ferredis-gui
 ```
 
-## Packaging
+## Packaging local
 
 ```bash
-# Linux
-./packaging/package.sh
-
-# Windows (PowerShell)
-.\packaging\package.ps1
+./packaging/package.sh              # Linux tarball + systemd
+./packaging/archlinux/package-arch.sh
+.\packaging\package.ps1             # Windows zip + service
 ```
 
-Artefacts dans `dist/`.
+Config : `/etc/ferredis/ferredis.conf` (Linux) · `%ProgramFiles%\Ferredis\ferredis.conf` (Windows).
 
 ## Licence
 

@@ -1,0 +1,3 @@
+d /var/lib/ferredis 0750 ferredis ferredis -
+d /etc/ferredis 0755 root root -
+d /run/ferredis 0755 ferredis ferredis -

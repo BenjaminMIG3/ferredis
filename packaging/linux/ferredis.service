@@ -1,0 +1,28 @@
+[Unit]
+Description=Ferredis — serveur compatible Redis
+Documentation=https://github.com/BenjaminDUSUNCELI/ferredis
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ferredis
+Group=ferredis
+ExecStart=/usr/bin/ferredis-server --config /etc/ferredis/ferredis.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+LimitNOFILE=65535
+WorkingDirectory=/var/lib/ferredis
+RuntimeDirectory=ferredis
+RuntimeDirectoryMode=0755
+# Sécurité de base (compatible la plupart des distros systemd)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/ferredis /etc/ferredis
+
+[Install]
+WantedBy=multi-user.target

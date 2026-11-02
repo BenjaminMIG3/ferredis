@@ -1,0 +1,16 @@
+post_install() {
+  systemd-sysusers ferredis.conf 2>/dev/null || true
+  systemd-tmpfiles --create ferredis.conf 2>/dev/null || true
+  echo "Ferredis installé. Activez le service :"
+  echo "  sudo systemctl enable --now ferredis"
+}
+
+post_upgrade() {
+  systemd-sysusers ferredis.conf 2>/dev/null || true
+  systemd-tmpfiles --create ferredis.conf 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+}
+
+pre_remove() {
+  systemctl disable --now ferredis.service 2>/dev/null || true
+}

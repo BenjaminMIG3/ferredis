@@ -1,0 +1,53 @@
+# Maintainer: Ferredis Contributors <https://github.com/BenjaminDUSUNCELI/ferredis>
+# Paquet AUR (source) — publication : https://wiki.archlinux.org/title/AUR_submission_guidelines
+#
+# Install via AUR helper :
+#   yay -S ferredis
+#   paru -S ferredis
+
+pkgname=ferredis
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Redis-compatible in-memory server written in Rust (server, CLI, GUI)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/BenjaminDUSUNCELI/ferredis"
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libxcb')
+makedepends=('cargo' 'rust' 'clang' 'pkgconf')
+provides=('ferredis-server' 'ferredis-cli' 'ferredis-gui')
+backup=('etc/ferredis/ferredis.conf')
+install=ferredis.install
+options=('!lto')
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --release --frozen -p ferredis-server -p ferredis-cli -p ferredis-gui \
+    || cargo build --release -p ferredis-server -p ferredis-cli -p ferredis-gui
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+  install -Dm755 target/release/ferredis-server "${pkgdir}/usr/bin/ferredis-server"
+  install -Dm755 target/release/ferredis-cli "${pkgdir}/usr/bin/ferredis-cli"
+  install -Dm755 target/release/ferredis-gui "${pkgdir}/usr/bin/ferredis-gui"
+  install -Dm644 packaging/linux/ferredis.service \
+    "${pkgdir}/usr/lib/systemd/system/ferredis.service"
+  install -Dm644 packaging/linux/ferredis.conf \
+    "${pkgdir}/etc/ferredis/ferredis.conf"
+  install -Dm644 packaging/linux/ferredis.sysusers \
+    "${pkgdir}/usr/lib/sysusers.d/ferredis.conf"
+  install -Dm644 packaging/linux/ferredis.tmpfiles \
+    "${pkgdir}/usr/lib/tmpfiles.d/ferredis.conf"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}
