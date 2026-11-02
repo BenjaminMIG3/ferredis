@@ -54,10 +54,22 @@ pub struct EventRow {
     pub detail: String,
 }
 
+/// Base non vide (ou sélectionnée) exposée au sélecteur GUI.
+#[derive(Clone, Debug, Default)]
+pub struct DbInfo {
+    pub index: u16,
+    pub keys: i64,
+    pub expires: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub info: Vec<(String, String)>,
+    /// Index de la base SELECT'ée pour ce snapshot.
+    pub db: u16,
     pub dbsize: i64,
+    /// Bases actives (au moins une clé), plus la base courante si vide.
+    pub databases: Vec<DbInfo>,
     pub keys: Vec<KeyRow>,
     pub truncated: bool,
     pub clients: Vec<ClientRow>,
@@ -91,8 +103,11 @@ pub enum Request {
         host: String,
         port: u16,
     },
+    /// Ferme la connexion TCP sans en ouvrir une nouvelle.
+    Disconnect,
     Snapshot {
         pattern: String,
+        db: u16,
     },
     Exec(String),
     Inspect(String),
@@ -199,17 +214,28 @@ pub fn spawn_worker(host: String, port: u16, ctx: egui::Context) -> Backend {
     thread::spawn(move || {
         let mut target = (host, port);
         let mut conn: Option<Conn> = None;
+        let mut current_db: u16 = 0;
 
         for req in req_rx {
-            if let Request::Connect { host, port } = req {
-                target = (host, port);
-                conn = None;
-                continue;
+            match req {
+                Request::Connect { host, port } => {
+                    target = (host, port);
+                    conn = None;
+                    current_db = 0;
+                    continue;
+                }
+                Request::Disconnect => {
+                    conn = None;
+                    current_db = 0;
+                    continue;
+                }
+                _ => {}
             }
-            let reply = match run_request(&mut conn, &target, req) {
+            let reply = match run_request(&mut conn, &target, &mut current_db, req) {
                 Ok(r) => r,
                 Err(e) => {
                     conn = None; // reconnexion à la prochaine requête
+                    current_db = 0;
                     Reply::Down(e)
                 }
             };
@@ -226,6 +252,7 @@ pub fn spawn_worker(host: String, port: u16, ctx: egui::Context) -> Backend {
 fn run_request(
     conn: &mut Option<Conn>,
     target: &(String, u16),
+    current_db: &mut u16,
     req: Request,
 ) -> Result<Reply, String> {
     if conn.is_none() {
@@ -235,12 +262,18 @@ fn run_request(
             "ferredis-gui",
             Duration::from_secs(5),
         )?);
+        *current_db = 0;
     }
     let c = conn.as_mut().expect("connexion établie ci-dessus");
 
     match req {
-        Request::Connect { .. } => unreachable!("traité par la boucle"),
-        Request::Snapshot { pattern } => snapshot(c, &pattern).map(Reply::Snapshot),
+        Request::Connect { .. } | Request::Disconnect => {
+            unreachable!("traité par la boucle worker")
+        }
+        Request::Snapshot { pattern, db } => {
+            select_db(c, current_db, db)?;
+            snapshot(c, &pattern, db).map(Reply::Snapshot)
+        }
         Request::Inspect(key) => inspect(c, &key).map(Reply::Detail),
         Request::Delete(key) => {
             c.call(&["DEL", &key])?;
@@ -275,6 +308,20 @@ fn run_request(
     }
 }
 
+fn select_db(c: &mut Conn, current: &mut u16, db: u16) -> Result<(), String> {
+    if *current == db {
+        return Ok(());
+    }
+    let idx = db.to_string();
+    match c.call(&["SELECT", &idx])? {
+        RespValue::Error(e) => Err(crate::textutil::from_redis_bytes(&e)),
+        _ => {
+            *current = db;
+            Ok(())
+        }
+    }
+}
+
 /// Commandes qui ne peuvent pas fonctionner sur la connexion partagée de la console.
 fn rejected_in_console(cmd: &str) -> Option<String> {
     const STREAMING: [&str; 5] = ["SUBSCRIBE", "PSUBSCRIBE", "MONITOR", "SYNC", "PSYNC"];
@@ -287,7 +334,12 @@ fn rejected_in_console(cmd: &str) -> Option<String> {
         "BLMOVE",
     ];
     let up = cmd.to_ascii_uppercase();
-    if STREAMING.contains(&up.as_str()) {
+    if up == "SELECT" {
+        Some(
+            "SELECT : utilise le sélecteur de base de l'onglet Clés (évite de désynchroniser la session)."
+                .into(),
+        )
+    } else if STREAMING.contains(&up.as_str()) {
         Some(format!(
             "{up} n'est pas disponible dans la console (utilise l'onglet Live)."
         ))
@@ -300,7 +352,7 @@ fn rejected_in_console(cmd: &str) -> Option<String> {
     }
 }
 
-fn snapshot(c: &mut Conn, pattern: &str) -> Result<Snapshot, String> {
+fn snapshot(c: &mut Conn, pattern: &str, db: u16) -> Result<Snapshot, String> {
     let started = Instant::now();
     let first = c.pipeline(&[
         vec!["PING".into()],
@@ -308,6 +360,7 @@ fn snapshot(c: &mut Conn, pattern: &str) -> Result<Snapshot, String> {
         vec!["DBSIZE".into()],
         vec!["CLIENT".into(), "LIST".into()],
         vec!["FERREDIS".into(), "EVENTS".into(), EVENT_LIMIT.to_string()],
+        vec!["DATABASES".into()],
     ])?;
     let rtt = started.elapsed();
 
@@ -322,6 +375,19 @@ fn snapshot(c: &mut Conn, pattern: &str) -> Result<Snapshot, String> {
         .map(|t| t.lines().filter_map(parse_client_line).collect())
         .unwrap_or_default();
     let events = parse_events(&first[4]);
+    let mut databases = parse_databases(&first[5]);
+    if databases.is_empty() {
+        databases = databases_from_info(&info);
+    }
+    // Toujours exposer la base courante, même vide (sinon le sélecteur disparaît).
+    if !databases.iter().any(|d| d.index == db) {
+        databases.push(DbInfo {
+            index: db,
+            keys: dbsize,
+            expires: 0,
+        });
+        databases.sort_by_key(|d| d.index);
+    }
 
     // Parcours SCAN jusqu'à la limite.
     let pattern = if pattern.trim().is_empty() {
@@ -382,13 +448,109 @@ fn snapshot(c: &mut Conn, pattern: &str) -> Result<Snapshot, String> {
 
     Ok(Snapshot {
         info,
+        db,
         dbsize,
+        databases,
         keys,
         truncated,
         clients,
         events,
         rtt,
     })
+}
+
+/// Parse `DATABASES` : `[["db", N, "keys", K, "expires", E], …]` ou ancien `[[N, K, E], …]`.
+fn parse_databases(v: &RespValue) -> Vec<DbInfo> {
+    let RespValue::Array(Some(items)) = v else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let RespValue::Array(Some(fields)) = item else {
+            continue;
+        };
+        if let Some(db) = parse_db_entry(fields) {
+            out.push(db);
+        }
+    }
+    out.sort_by_key(|d| d.index);
+    out
+}
+
+fn parse_db_entry(fields: &[RespValue]) -> Option<DbInfo> {
+    // Ancien format : trois entiers [db, keys, expires].
+    if fields.len() == 3 && fields.iter().all(|f| matches!(f, RespValue::Integer(_))) {
+        return Some(DbInfo {
+            index: as_i64(&fields[0])? as u16,
+            keys: as_i64(&fields[1])?,
+            expires: as_i64(&fields[2])?,
+        });
+    }
+    // Format étiqueté : db / keys / expires.
+    let mut index = None;
+    let mut keys = None;
+    let mut expires = None;
+    let mut i = 0;
+    while i + 1 < fields.len() {
+        let label = as_text(&fields[i])?.to_ascii_lowercase();
+        let val = as_i64(&fields[i + 1])?;
+        match label.as_str() {
+            "db" => index = Some(val as u16),
+            "keys" => keys = Some(val),
+            "expires" => expires = Some(val),
+            _ => {}
+        }
+        i += 2;
+    }
+    Some(DbInfo {
+        index: index?,
+        keys: keys.unwrap_or(0),
+        expires: expires.unwrap_or(0),
+    })
+}
+
+fn as_i64(v: &RespValue) -> Option<i64> {
+    match v {
+        RespValue::Integer(n) => Some(*n),
+        RespValue::BulkString(Some(b)) | RespValue::SimpleString(b) => {
+            crate::textutil::from_redis_bytes(b).parse().ok()
+        }
+        _ => None,
+    }
+}
+
+/// Repli : lignes `dbN:keys=…,expires=…` de INFO keyspace.
+fn databases_from_info(info: &[(String, String)]) -> Vec<DbInfo> {
+    let mut out = Vec::new();
+    for (k, v) in info {
+        let Some(rest) = k.strip_prefix("db") else {
+            continue;
+        };
+        if !rest.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(index) = rest.parse::<u16>() else {
+            continue;
+        };
+        let mut keys = 0i64;
+        let mut expires = 0i64;
+        for part in v.split(',') {
+            if let Some((n, val)) = part.split_once('=') {
+                match n {
+                    "keys" => keys = val.parse().unwrap_or(0),
+                    "expires" => expires = val.parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+        }
+        out.push(DbInfo {
+            index,
+            keys,
+            expires,
+        });
+    }
+    out.sort_by_key(|d| d.index);
+    out
 }
 
 fn inspect(c: &mut Conn, key: &str) -> Result<KeyDetail, String> {

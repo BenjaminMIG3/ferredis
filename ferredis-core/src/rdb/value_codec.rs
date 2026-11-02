@@ -37,8 +37,8 @@ pub fn encode_value(out: &mut Vec<u8>, value: &RedisValue) {
         RedisValue::Set(s) => {
             write_u8(out, TYPE_SET);
             write_len(out, s.len() as u64);
-            for m in s {
-                write_raw_string(out, m);
+            for m in s.iter_members() {
+                write_raw_string(out, &m);
             }
         }
         RedisValue::Hash(h) => {
@@ -307,7 +307,7 @@ pub fn decode_typed_value(data: &[u8], i: &mut usize, rdbtype: u8) -> Result<Red
             for _ in 0..n {
                 s.insert(read_string(data, i)?);
             }
-            Ok(RedisValue::Set(s))
+            Ok(RedisValue::Set(s.into()))
         }
         TYPE_HASH => {
             let (n, _) = read_len(data, i)?;
@@ -699,5 +699,5 @@ fn decode_intset(data: &[u8], i: &mut usize) -> Result<RedisValue> {
         };
         s.insert(Bytes::from(v.to_string()));
     }
-    Ok(RedisValue::Set(s))
+    Ok(RedisValue::Set(s.into()))
 }

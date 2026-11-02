@@ -366,6 +366,40 @@ fn is_search_opt(b: &[u8]) -> bool {
     )
 }
 
+/// Filtre agrégat minimal : `@field==value`, `@field!=value`, `@field>num`, `@field<num`.
+fn row_matches_filter(row: &std::collections::BTreeMap<String, String>, expr: &str) -> bool {
+    let expr = expr.trim();
+    for op in ["==", "!=", ">=", "<=", ">", "<"] {
+        if let Some((left, right)) = expr.split_once(op) {
+            let field = left.trim().trim_start_matches('@');
+            let expect = right.trim().trim_matches('"').trim_matches('\'');
+            let got = row.get(field).map(String::as_str).unwrap_or("");
+            return match op {
+                "==" => got == expect,
+                "!=" => got != expect,
+                ">" => {
+                    let (a, b) = (got.parse::<f64>().ok(), expect.parse::<f64>().ok());
+                    matches!((a, b), (Some(x), Some(y)) if x > y)
+                }
+                "<" => {
+                    let (a, b) = (got.parse::<f64>().ok(), expect.parse::<f64>().ok());
+                    matches!((a, b), (Some(x), Some(y)) if x < y)
+                }
+                ">=" => {
+                    let (a, b) = (got.parse::<f64>().ok(), expect.parse::<f64>().ok());
+                    matches!((a, b), (Some(x), Some(y)) if x >= y)
+                }
+                "<=" => {
+                    let (a, b) = (got.parse::<f64>().ok(), expect.parse::<f64>().ok());
+                    matches!((a, b), (Some(x), Some(y)) if x <= y)
+                }
+                _ => true,
+            };
+        }
+    }
+    true
+}
+
 fn doc_payload(
     ctx: &CommandContext,
     db: usize,
@@ -498,6 +532,8 @@ pub(crate) fn cmd_ft_aggregate(ctx: &CommandContext, state: &mut ClientState, ar
     let mut limit_off = 0usize;
     let mut limit_num = 10usize;
     let mut cursor_count: Option<usize> = None;
+    let mut filter_expr: Option<String> = None;
+    let mut apply_ops: Vec<(String, String)> = Vec::new();
 
     let mut i = 3;
     while i < args.len() {
@@ -583,7 +619,34 @@ pub(crate) fn cmd_ft_aggregate(ctx: &CommandContext, state: &mut ClientState, ar
                         Some(parse_i64(args.get(i).unwrap_or(&Bytes::from_static(b"10"))).unwrap_or(10) as usize);
                 }
             }
-            "APPLY" | "FILTER" | "TIMEOUT" | "PARAMS" | "DIALECT" => {
+            "FILTER" => {
+                i += 1;
+                if i < args.len() {
+                    filter_expr = Some(String::from_utf8_lossy(&args[i]).into_owned());
+                    i += 1;
+                }
+                continue;
+            }
+            "APPLY" => {
+                // APPLY <expr> AS <name> — expression triviale : copie champ ou littéral.
+                i += 1;
+                let expr = args
+                    .get(i)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                i += 1;
+                if i < args.len() && upper(&args[i]) == "AS" {
+                    i += 1;
+                    let name = args
+                        .get(i)
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_else(|| "applied".into());
+                    apply_ops.push((expr, name));
+                    i += 1;
+                }
+                continue;
+            }
+            "TIMEOUT" | "PARAMS" | "DIALECT" => {
                 i += 1;
                 while i < args.len() && !is_search_opt(&args[i]) {
                     i += 1;
@@ -624,9 +687,21 @@ pub(crate) fn cmd_ft_aggregate(ctx: &CommandContext, state: &mut ClientState, ar
             if !load_fields.is_empty() {
                 m.retain(|k, _| k == "__key" || load_fields.iter().any(|f| f == k));
             }
+            for (expr, name) in &apply_ops {
+                let val = if let Some(src) = expr.strip_prefix('@') {
+                    m.get(src).cloned().unwrap_or_default()
+                } else {
+                    expr.clone()
+                };
+                m.insert(name.clone(), val);
+            }
             m
         })
         .collect();
+
+    if let Some(ref fe) = filter_expr {
+        rows.retain(|m| row_matches_filter(m, fe));
+    }
 
     if !groupby.is_empty() {
         let mut groups: BTreeMap<Vec<String>, Vec<BTreeMap<String, String>>> = BTreeMap::new();

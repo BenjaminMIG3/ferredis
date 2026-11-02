@@ -118,8 +118,8 @@ typed_accessors!(
     set_mut,
     set_or_create,
     Set,
-    std::collections::HashSet<Bytes>,
-    std::collections::HashSet::new()
+    crate::encoding::SetObject,
+    crate::encoding::SetObject::new()
 );
 typed_accessors!(
     zset_mut,
@@ -176,6 +176,23 @@ impl Database {
         self.dbs[db].write()
     }
 
+    /// Lecture partagée (F2) — chemins GET/EXISTS sans bloquer les autres lecteurs.
+    pub(crate) fn dbs_read(&self, db: usize) -> parking_lot::RwLockReadGuard<'_, DbInner> {
+        self.dbs[db].read()
+    }
+
+    /// Shard d'une clé (F2) — base pour le keyspace multi-cœur.
+    #[inline]
+    pub fn shard_of(key: &[u8], shards: usize) -> usize {
+        let shards = shards.max(1);
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in key {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        (h as usize) & (shards - 1)
+    }
+
     /// Échange atomique du contenu de deux bases (verrous pris dans l'ordre des index).
     pub fn swap_dbs(&self, a: usize, b: usize) -> bool {
         if a >= self.dbs.len() || b >= self.dbs.len() {
@@ -196,12 +213,28 @@ impl Database {
     }
 
     pub fn get_string(&self, db: usize, key: &Bytes) -> Result<Option<Bytes>, &'static str> {
-        let mut guard = self.dbs[db].write();
+        // Lecture sous read-lock ; purge expire nécessite write — double check.
+        {
+            let guard = self.dbs_read(db);
+            if let Some(e) = guard.map.get(key) {
+                if !e.is_expired() {
+                    return match &e.value {
+                        RedisValue::String(s) => {
+                            Ok(Some(crate::mem::decompress_string_bytes(s)))
+                        }
+                        _ => Err(WRONGTYPE),
+                    };
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        let mut guard = self.dbs_write(db);
         match guard.get_fresh(key) {
             None => Ok(None),
             Some(e) => match &e.value {
-                RedisValue::String(s) => Ok(Some(s.clone())),
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
+                RedisValue::String(s) => Ok(Some(crate::mem::decompress_string_bytes(s))),
+                _ => Err(WRONGTYPE),
             },
         }
     }
@@ -365,19 +398,27 @@ impl Database {
                 self.touch();
                 Ok(n)
             }
-            Some(entry) => match &mut entry.value {
-                RedisValue::String(s) => {
-                    let cur: i64 = std::str::from_utf8(s)
-                        .ok()
-                        .and_then(|t| t.parse().ok())
-                        .ok_or("ERR value is not an integer or out of range")?;
-                    let n = cur.checked_add(delta).ok_or("ERR overflow")?;
-                    *s = Bytes::from(n.to_string());
-                    self.touch();
-                    Ok(n)
-                }
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
-            },
+            Some(entry) => {
+                let n = match &mut entry.value {
+                    RedisValue::String(s) => {
+                        let cur: i64 = std::str::from_utf8(s)
+                            .ok()
+                            .and_then(|t| t.parse().ok())
+                            .ok_or("ERR value is not an integer or out of range")?;
+                        let n = cur.checked_add(delta).ok_or("ERR overflow")?;
+                        *s = Bytes::from(n.to_string());
+                        n
+                    }
+                    _ => {
+                        return Err(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value",
+                        )
+                    }
+                };
+                entry.mark_written();
+                self.touch();
+                Ok(n)
+            }
         }
     }
 
@@ -409,20 +450,28 @@ impl Database {
                 self.touch();
                 Ok(len)
             }
-            Some(entry) => match &mut entry.value {
-                RedisValue::List(list) => {
-                    for v in values {
-                        if left {
-                            list.push_front(v.clone());
-                        } else {
-                            list.push_back(v.clone());
+            Some(entry) => {
+                let len = match &mut entry.value {
+                    RedisValue::List(list) => {
+                        for v in values {
+                            if left {
+                                list.push_front(v.clone());
+                            } else {
+                                list.push_back(v.clone());
+                            }
                         }
+                        list.len() as i64
                     }
-                    self.touch();
-                    Ok(list.len() as i64)
-                }
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
-            },
+                    _ => {
+                        return Err(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value",
+                        )
+                    }
+                };
+                entry.mark_written();
+                self.touch();
+                Ok(len)
+            }
         }
     }
 
@@ -592,6 +641,7 @@ impl Database {
                 | crate::eviction::MaxMemoryPolicy::VolatileLfu
                 | crate::eviction::MaxMemoryPolicy::VolatileRandom
                 | crate::eviction::MaxMemoryPolicy::VolatileTtl
+                | crate::eviction::MaxMemoryPolicy::VolatileTiered
         );
         guard
             .map

@@ -55,11 +55,15 @@ impl ManagedServer {
         }
 
         let bin = resolve_server_binary()?;
+        let data_dir = persistence_dir(&bin);
         let mut cmd = Command::new(&bin);
         cmd.arg("--bind")
             .arg(&spec.bind)
             .arg("--port")
             .arg(spec.port.to_string())
+            // Répertoire de données stable (indépendant du CWD du GUI).
+            .arg("--dir")
+            .arg(&data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -128,11 +132,22 @@ fn try_graceful_shutdown(host: &str, port: u16) {
         host,
         port,
         "ferredis-gui-shutdown",
-        Duration::from_millis(400),
+        // Laisser le temps à SAVE RDB synchrone (fichiers volumineux).
+        Duration::from_secs(5),
     ) else {
         return;
     };
-    let _ = conn.call(&["SHUTDOWN", "NOSAVE"]);
+    // Parité Redis / Ferredis : SHUTDOWN sans NOSAVE → flush RDB avant exit.
+    // (L'ancien `SHUTDOWN NOSAVE` expliquait la perte de clés au redémarrage GUI.)
+    let _ = conn.call(&["SHUTDOWN", "SAVE"]);
+}
+
+/// Dossier de persistance : à côté du binaire serveur (stable entre redémarrages).
+fn persistence_dir(server_bin: &Path) -> PathBuf {
+    server_bin
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn wait_or_kill(child: &mut Child, budget: Duration) -> Result<(), String> {

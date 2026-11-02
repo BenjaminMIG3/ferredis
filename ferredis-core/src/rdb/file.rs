@@ -376,7 +376,7 @@ mod tests {
         let cases = [
             RedisValue::Hash(HashObject::from_map(h)),
             RedisValue::List(VecDeque::from([Bytes::from_static(b"a")])),
-            RedisValue::Set(HashSet::from([Bytes::from_static(b"m")])),
+            RedisValue::Set(HashSet::from([Bytes::from_static(b"m")]).into()),
         ];
         for v in cases {
             let p = create_dump_payload(&v);

@@ -255,7 +255,17 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     set_dark(dark);
     use palette::*;
 
-    let mut style = (*ctx.style()).clone();
+    // egui 0.31+ conserve deux styles (dark/light) et une préférence (souvent System).
+    // Sans set_theme, le style OS actif peut rester clair alors que notre palette
+    // (AtomicBool) est déjà en sombre → TextEdit fond blanc + texte blanc, titres .strong() noirs.
+    let theme = if dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
+    ctx.set_theme(theme);
+
+    let mut style = (*ctx.style_of(theme)).clone();
     style.text_styles = [
         (
             TextStyle::Heading,
@@ -344,7 +354,14 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     v.widgets.active.corner_radius = corner(6);
     v.widgets.open = v.widgets.active;
 
-    ctx.set_style(style);
+    ctx.set_style_of(theme, style);
+}
+
+/// Champ texte aligné sur la palette (évite fond clair / texte clair désynchronisés).
+pub fn text_edit_single<'t>(text: &'t mut dyn egui::TextBuffer) -> egui::TextEdit<'t> {
+    egui::TextEdit::singleline(text)
+        .text_color(palette::text())
+        .background_color(palette::input())
 }
 
 pub fn card_frame() -> egui::Frame {

@@ -124,6 +124,8 @@ pub struct App {
     // Navigation / filtres
     pub tab: Tab,
     pub key_filter: String,
+    /// Base Redis actuellement inspectée (SELECT).
+    pub selected_db: u16,
     pub selected_key: Option<String>,
     pub confirm_delete: Option<String>,
     pub event_filter: String,
@@ -145,6 +147,9 @@ pub struct App {
 
     /// Serveur local dont le GUI possède le cycle de vie (start/stop/restart).
     pub server: ManagedServer,
+
+    /// `true` tant que l'utilisateur veut une session ouverte (bloque le refresh auto après Déconnecter).
+    pub session_active: bool,
 }
 
 impl App {
@@ -165,6 +170,7 @@ impl App {
             auto_refresh: true,
             tab: Tab::Overview,
             key_filter: String::new(),
+            selected_db: 0,
             selected_key: None,
             confirm_delete: None,
             event_filter: "tous".into(),
@@ -179,6 +185,7 @@ impl App {
             toast: None,
             dark,
             server: ManagedServer::default(),
+            session_active: true,
         };
         app.restart_live();
         app
@@ -202,13 +209,13 @@ impl App {
         &mut self,
         op: impl FnOnce(&mut ManagedServer, ServerSpec) -> Result<(), String>,
         ok: &str,
-        reconnect: bool,
+        then_connect: bool,
     ) {
         let spec = self.desired_spec();
         match op(&mut self.server, spec) {
             Ok(()) => {
                 self.notify(ok, false);
-                if reconnect {
+                if then_connect {
                     self.reconnect();
                 }
             }
@@ -222,10 +229,46 @@ impl App {
 
     pub fn stop_server(&mut self) {
         self.run_server_op(|s, _| s.stop(), "Serveur arrêté", false);
+        // Process coupé : couper la session sans second toast.
+        self.session_active = false;
+        self.backend.send(Request::Disconnect);
+        self.connected = false;
+        self.snapshot = None;
+        self.detail = None;
+        self.selected_db = 0;
+        self.selected_key = None;
+        self.in_flight = false;
+        self.refresh_now = false;
+        self.stop_live();
     }
 
     pub fn restart_server(&mut self) {
         self.run_server_op(ManagedServer::restart, "Serveur redémarré", true);
+    }
+
+    /// Bouton session : Connecter ↔ Déconnecter (indépendant du process serveur).
+    pub fn toggle_session(&mut self) {
+        if self.session_active && self.connected {
+            self.disconnect_session();
+        } else {
+            self.reconnect();
+        }
+    }
+
+    /// Ferme la session GUI sans toucher au process `ferredis-server`.
+    pub fn disconnect_session(&mut self) {
+        self.session_active = false;
+        self.backend.send(Request::Disconnect);
+        self.connected = false;
+        self.error = None;
+        self.snapshot = None;
+        self.detail = None;
+        self.selected_db = 0;
+        self.selected_key = None;
+        self.in_flight = false;
+        self.refresh_now = false;
+        self.stop_live();
+        self.notify("Déconnecté", false);
     }
 
     // ───────────── Requêtes ─────────────
@@ -243,7 +286,7 @@ impl App {
     }
 
     fn request_snapshot(&mut self) {
-        if self.in_flight {
+        if !self.session_active || self.in_flight {
             return;
         }
         self.in_flight = true;
@@ -251,6 +294,7 @@ impl App {
         self.last_refresh = Instant::now();
         self.backend.send(Request::Snapshot {
             pattern: self.scan_pattern(),
+            db: self.selected_db,
         });
     }
 
@@ -258,7 +302,20 @@ impl App {
         self.refresh_now = true;
     }
 
+    /// Change de base logique et recharge le keyspace.
+    pub fn select_db(&mut self, db: u16) {
+        if self.selected_db == db {
+            return;
+        }
+        self.selected_db = db;
+        self.selected_key = None;
+        self.detail = None;
+        self.confirm_delete = None;
+        self.refresh();
+    }
+
     pub fn reconnect(&mut self) {
+        self.session_active = true;
         self.backend.send(Request::Connect {
             host: self.host.trim().to_string(),
             port: self.port,
@@ -267,6 +324,8 @@ impl App {
         self.error = None;
         self.snapshot = None;
         self.detail = None;
+        self.selected_db = 0;
+        self.selected_key = None;
         self.in_flight = false;
         self.refresh_now = true;
         self.restart_live();
@@ -322,7 +381,7 @@ impl App {
 
     pub fn restart_live(&mut self) {
         self.stop_live();
-        if self.live_on {
+        if self.live_on && self.session_active {
             self.live_handle = Some(spawn_live(
                 self.host.trim().to_string(),
                 self.port,
@@ -340,8 +399,13 @@ impl App {
             match reply {
                 Reply::Snapshot(s) => {
                     self.in_flight = false;
+                    if !self.session_active {
+                        // Déconnecté volontairement pendant le round-trip : ignorer.
+                        continue;
+                    }
                     self.connected = true;
                     self.error = None;
+                    self.selected_db = s.db;
                     self.snapshot = Some(s);
                     if let Some(k) = self.selected_key.clone() {
                         self.backend.send(Request::Inspect(k));
@@ -405,15 +469,21 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_replies();
 
-        // Un événement temps réel déclenche une actualisation (limitée par `in_flight`).
-        if self.live_on && self.feed.dirty.swap(false, Ordering::SeqCst) {
-            self.refresh_now = true;
-        }
-        if self.auto_refresh && self.last_refresh.elapsed() >= REFRESH_EVERY {
-            self.refresh_now = true;
-        }
-        if self.refresh_now {
-            self.request_snapshot();
+        // Après « Déconnecter », aucune requête (sinon reconnexion silencieuse).
+        if self.session_active {
+            if self.live_on && self.feed.dirty.swap(false, Ordering::SeqCst) {
+                self.refresh_now = true;
+            }
+            if self.auto_refresh && self.last_refresh.elapsed() >= REFRESH_EVERY {
+                self.refresh_now = true;
+            }
+            if self.refresh_now {
+                self.request_snapshot();
+            }
+        } else {
+            let _ = self.feed.dirty.swap(false, Ordering::SeqCst);
+            self.refresh_now = false;
+            self.in_flight = false;
         }
         if let Some(t) = &self.toast {
             if t.at.elapsed() > Duration::from_secs(4) {

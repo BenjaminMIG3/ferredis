@@ -32,10 +32,8 @@ fn parse_json_arg(b: &[u8]) -> Result<Value, &'static str> {
 
 fn path_or_root(args: &[Bytes], i: usize) -> Result<Path, &'static str> {
     match args.get(i) {
-        None => Ok(Path {
-            recursive: false,
-            segs: Vec::new(),
-        }),
+        // RedisJSON : défaut = `$` (JSONPath) → réponses en tableau.
+        None => Ok(Path::root_jsonpath()),
         Some(p) => Path::parse(std::str::from_utf8(p).unwrap_or("")),
     }
 }
@@ -115,10 +113,7 @@ pub(crate) fn cmd_json_get(ctx: &CommandContext, state: &mut ClientState, args: 
     }
     let key = &args[1];
     let paths: Vec<Path> = if args.len() == 2 {
-        vec![Path {
-            recursive: false,
-            segs: Vec::new(),
-        }]
+        vec![Path::root_jsonpath()]
     } else {
         let mut ps = Vec::new();
         for p in &args[2..] {
@@ -305,22 +300,22 @@ pub(crate) fn cmd_json_type(ctx: &CommandContext, state: &mut ClientState, args:
     };
     ctx.db.with_db(state.db_index, |d| {
         match d.get_fresh(key).map(|e| &e.value) {
-            None => RespValue::null_bulk(),
+            None => {
+                if path.is_jsonpath() {
+                    RespValue::array(vec![])
+                } else {
+                    RespValue::null_bulk()
+                }
+            }
             Some(RedisValue::Json(doc)) => {
                 let hits = json_path::get_all(doc, &path);
-                if hits.is_empty() {
-                    RespValue::null_bulk()
-                } else if hits.len() == 1 {
-                    RespValue::bulk(Bytes::from_static(json_path::json_type_name(hits[0]).as_bytes()))
-                } else {
-                    RespValue::array(
-                        hits.iter()
-                            .map(|v| {
-                                RespValue::bulk(Bytes::from_static(json_path::json_type_name(v).as_bytes()))
-                            })
-                            .collect(),
-                    )
-                }
+                let items: Vec<RespValue> = hits
+                    .iter()
+                    .map(|v| {
+                        RespValue::bulk(Bytes::from_static(json_path::json_type_name(v).as_bytes()))
+                    })
+                    .collect();
+                json_path::reply_for_path(&path, items, RespValue::null_bulk())
             }
             Some(_) => err(WRONGTYPE),
         }
@@ -362,26 +357,23 @@ fn json_scalar_len(
     };
     ctx.db.with_db(state.db_index, |d| {
         match d.get_fresh(key).map(|e| &e.value) {
-            None => RespValue::null_bulk(),
+            None => {
+                if path.is_jsonpath() {
+                    RespValue::array(vec![])
+                } else {
+                    RespValue::null_bulk()
+                }
+            }
             Some(RedisValue::Json(doc)) => {
                 let hits = json_path::get_all(doc, &path);
-                if hits.is_empty() {
-                    RespValue::null_bulk()
-                } else if hits.len() == 1 {
-                    match f(hits[0]) {
+                let items: Vec<RespValue> = hits
+                    .iter()
+                    .map(|v| match f(v) {
                         Some(n) => RespValue::Integer(n),
                         None => RespValue::null_bulk(),
-                    }
-                } else {
-                    RespValue::array(
-                        hits.iter()
-                            .map(|v| match f(v) {
-                                Some(n) => RespValue::Integer(n),
-                                None => RespValue::null_bulk(),
-                            })
-                            .collect(),
-                    )
-                }
+                    })
+                    .collect();
+                json_path::reply_for_path(&path, items, RespValue::null_bulk())
             }
             Some(_) => err(WRONGTYPE),
         }
@@ -485,13 +477,7 @@ pub(crate) fn cmd_json_strappend(ctx: &CommandContext, state: &mut ClientState, 
     }
     let key = &args[1];
     let (path, json_arg) = if args.len() == 3 {
-        (
-            Path {
-                recursive: false,
-                segs: Vec::new(),
-            },
-            &args[2],
-        )
+        (Path::root_jsonpath(), &args[2])
     } else {
         (
             match Path::parse(arg_str(args, 2).unwrap_or("$")) {

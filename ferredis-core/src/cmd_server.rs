@@ -34,7 +34,10 @@ fn info_sections(ctx: &CommandContext) -> Vec<(&'static str, String)> {
     for db in 0..ctx.db.db_count() {
         let (keys, expires) = ctx.db.key_stats(db);
         if keys > 0 {
-            let _ = write!(keyspace, "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n");
+            let _ = write!(
+                keyspace,
+                "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n"
+            );
         }
     }
 
@@ -61,27 +64,48 @@ fn info_sections(ctx: &CommandContext) -> Vec<(&'static str, String)> {
         ),
         (
             "Memory",
-            format!(
-                "used_memory:{mem}\r\nused_memory_human:{}\r\nmaxmemory:{}\r\nmaxmemory_policy:{}\r\nevicted_keys:{}\r\nmem_fragmentation_ratio:1.00\r\nactive_defrag_running:0\r\nio-threads:{}\r\nio_threaded_reads_processed:{}\r\nio_threaded_writes_processed:{}\r\n",
-                human_bytes(mem),
-                cfg.maxmemory,
-                cfg.maxmemory_policy,
-                cfg.stats.evicted_keys(),
-                cfg.io_threads,
-                crate::io_threads::global()
-                    .map(|p| p.stats().reads_processed.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0),
-                crate::io_threads::global()
-                    .map(|p| p.stats().writes_processed.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0),
-            ),
+            {
+                ctx.storage.mem.set_used(mem as u64);
+                let frag = ctx.storage.mem.fragmentation_ratio();
+                let (_, _, defrag_running) = ctx.defrag.snapshot();
+                format!(
+                    "used_memory:{mem}\r\nused_memory_human:{}\r\nused_memory_rss:{}\r\nmaxmemory:{}\r\nmaxmemory_soft:{}\r\nmaxmemory_policy:{}\r\nevicted_keys:{}\r\nmem_fragmentation_ratio:{frag:.2}\r\nactive_defrag_running:{}\r\ncompress_threshold:{}\r\ncompress_bytes_saved:{}\r\n{}\
+io-threads:{}\r\nio_threaded_reads_processed:{}\r\nio_threaded_writes_processed:{}\r\n",
+                    human_bytes(mem),
+                    ctx.storage.mem.rss_bytes(),
+                    cfg.maxmemory,
+                    cfg.maxmemory_soft,
+                    cfg.maxmemory_policy,
+                    cfg.stats.evicted_keys(),
+                    defrag_running as u8,
+                    cfg.compress_threshold,
+                    ctx.storage.mem.compress_saves(),
+                    ctx.storage.info_lines(),
+                    cfg.io_threads,
+                    crate::io_threads::global()
+                        .map(|p| p.stats().reads_processed.load(std::sync::atomic::Ordering::Relaxed))
+                        .unwrap_or(0),
+                    crate::io_threads::global()
+                        .map(|p| p.stats().writes_processed.load(std::sync::atomic::Ordering::Relaxed))
+                        .unwrap_or(0),
+                )
+            },
         ),
         (
             "Persistence",
             format!(
-                "loading:0\r\nrdb_changes_since_last_save:{}\r\naof_enabled:{}\r\n",
+                "loading:0\r\nrdb_changes_since_last_save:{}\r\naof_enabled:{}\r\naof_group_commit_ms:{}\r\n",
                 ctx.db.dirty.load(std::sync::atomic::Ordering::Relaxed),
                 ctx.aof.enabled() as u8,
+                cfg.aof_group_commit_ms,
+            ),
+        ),
+        (
+            "Cluster",
+            format!(
+                "cluster_enabled:{}\r\n{}",
+                cfg.cluster_enabled as u8,
+                ctx.raft.info_lines(),
             ),
         ),
         (
@@ -156,7 +180,11 @@ fn client_line(ctx: &CommandContext, info: &crate::clients::ClientInfo, multi: b
 }
 
 /// CLIENT ID|GETNAME|SETNAME|SETINFO|LIST|INFO|KILL|PAUSE|…
-pub(crate) fn cmd_client(ctx: &CommandContext, state: &mut ClientState, args: &[Bytes]) -> RespValue {
+pub(crate) fn cmd_client(
+    ctx: &CommandContext,
+    state: &mut ClientState,
+    args: &[Bytes],
+) -> RespValue {
     if args.len() < 2 {
         return wrong_arity("client");
     }
@@ -167,7 +195,9 @@ pub(crate) fn cmd_client(ctx: &CommandContext, state: &mut ClientState, args: &[
                 return wrong_arity("client|setname");
             }
             if args[2].iter().any(|b| *b <= b' ' || *b > b'~') {
-                return err("ERR Client names cannot contain spaces, newlines or special characters.");
+                return err(
+                    "ERR Client names cannot contain spaces, newlines or special characters.",
+                );
             }
             let name = String::from_utf8_lossy(&args[2]).into_owned();
             if let Some(info) = &state.info {
@@ -229,7 +259,9 @@ pub(crate) fn cmd_client(ctx: &CommandContext, state: &mut ClientState, args: &[
         "UNBLOCK" => client_unblock(ctx, &args[2..]),
         "PAUSE" => client_pause(ctx, &args[2..]),
         "UNPAUSE" => {
-            ctx.pause.until_ms.store(0, std::sync::atomic::Ordering::SeqCst);
+            ctx.pause
+                .until_ms
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             RespValue::ok()
         }
         "TRACKING" => client_tracking(ctx, state, &args[2..]),
@@ -239,6 +271,21 @@ pub(crate) fn cmd_client(ctx: &CommandContext, state: &mut ClientState, args: &[
             RespValue::Integer(ctx.tracking.session(id).redirect_id())
         }
         "TRACKINGINFO" => client_trackinginfo(ctx, state),
+        "DURABILITY" => {
+            if args.len() == 2 {
+                return text(state.durability.as_str());
+            }
+            if args.len() != 3 {
+                return wrong_arity("client|durability");
+            }
+            match crate::command::DurabilityMode::parse(&String::from_utf8_lossy(&args[2])) {
+                Some(m) => {
+                    state.durability = m;
+                    RespValue::ok()
+                }
+                None => err("ERR syntax error — use none|everysec|always|quorum"),
+            }
+        }
         _ => err("ERR unknown subcommand or wrong number of arguments for 'CLIENT'"),
     }
 }
@@ -369,8 +416,7 @@ fn client_tracking(ctx: &CommandContext, state: &mut ClientState, args: &[Bytes]
             if flags.optin && flags.optout {
                 return err("ERR OPTIN and OPTOUT are mutually exclusive");
             }
-            ctx.tracking
-                .enable(info.id, flags, redirect, prefixes);
+            ctx.tracking.enable(info.id, flags, redirect, prefixes);
             info.set_tracking(true);
             info.set_redir(redirect);
             RespValue::ok()
@@ -561,6 +607,12 @@ fn config_value(ctx: &CommandContext, name: &str) -> Option<String> {
         "masterauth" => ctx.repl.masterauth().unwrap_or_default(),
         "timeout" => cfg.timeout.to_string(),
         "maxmemory" => cfg.maxmemory.to_string(),
+        "maxmemory-soft" => cfg.maxmemory_soft.to_string(),
+        "compress-threshold" => cfg.compress_threshold.to_string(),
+        "activedefrag" => if cfg.activedefrag { "yes" } else { "no" }.into(),
+        "storage-mode" => cfg.storage_mode.clone(),
+        "aof-group-commit-ms" => cfg.aof_group_commit_ms.to_string(),
+        "cluster-mode" => cfg.cluster_consistency.clone(),
         "slowlog-max-len" => cfg.slowlog.max_len().to_string(),
         "maxclients" => cfg.maxclients.to_string(),
         "maxmemory-policy" => cfg.maxmemory_policy.clone(),
@@ -617,6 +669,12 @@ const CONFIG_KEYS: &[&str] = &[
     "masterauth",
     "timeout",
     "maxmemory",
+    "maxmemory-soft",
+    "compress-threshold",
+    "activedefrag",
+    "storage-mode",
+    "aof-group-commit-ms",
+    "cluster-mode",
     "slowlog-max-len",
     "maxclients",
     "maxmemory-policy",
@@ -700,140 +758,177 @@ fn apply_config_set(ctx: &CommandContext, name: &str, value: &[u8]) -> Result<()
     let val = String::from_utf8_lossy(value);
     let mut sync_pass: Option<Option<String>> = None;
     {
-    let mut cfg = ctx.config.write();
-    match name {
-        "notify-keyspace-events" => {
-            *cfg.notify_keyspace_events.lock() = val.into_owned();
-        }
-        "requirepass" => {
-            let v = val.into_owned();
-            if v.is_empty() {
-                cfg.requirepass = None;
-                sync_pass = Some(None);
-            } else {
-                cfg.requirepass = Some(v.clone());
-                sync_pass = Some(Some(v));
+        let mut cfg = ctx.config.write();
+        match name {
+            "notify-keyspace-events" => {
+                *cfg.notify_keyspace_events.lock() = val.into_owned();
             }
-        }
-        "appendonly" => {
-            cfg.persist.appendonly =
-                matches!(val.to_ascii_lowercase().as_str(), "yes" | "1" | "true");
-        }
-        "appendfsync" => {
-            cfg.persist.appendfsync = val.clone().into_owned();
-            ctx.aof.set_fsync_policy(val.as_ref());
-        }
-        "aof-use-rdb-preamble" => {
-            cfg.persist.aof_use_rdb_preamble =
-                matches!(val.to_ascii_lowercase().as_str(), "yes" | "1" | "true");
-        }
-        "dir" => cfg.persist.dir = val.into_owned().into(),
-        "dbfilename" => cfg.persist.dbfilename = val.into_owned(),
-        "appendfilename" => cfg.persist.appendfilename = val.into_owned(),
-        "protected-mode" => {
-            cfg.protected_mode =
-                matches!(val.to_ascii_lowercase().as_str(), "yes" | "1" | "true");
-        }
-        "maxmemory-policy" => {
-            if crate::eviction::MaxMemoryPolicy::parse(val.as_ref()).is_none() {
-                return Err("ERR Invalid argument 'maxmemory-policy'".into());
-            }
-            cfg.maxmemory_policy = val.into_owned();
-        }
-        "unixsocket" => {
-            cfg.unixsocket = if val.is_empty() { None } else { Some(val.into_owned()) };
-        }
-        "unixsocketperm" => cfg.unixsocketperm = val.into_owned(),
-        "io-threads" => {
-            if let Ok(n) = val.parse::<u64>() {
-                cfg.io_threads = n.max(1);
-                ctx.tracking
-                    .io_threads_hint
-                    .store(cfg.io_threads.clamp(1, 255) as u8, std::sync::atomic::Ordering::Relaxed);
-                if let Some(pool) = crate::io_threads::global() {
-                    pool.configure(cfg.io_threads as usize);
+            "requirepass" => {
+                let v = val.into_owned();
+                if v.is_empty() {
+                    cfg.requirepass = None;
+                    sync_pass = Some(None);
+                } else {
+                    cfg.requirepass = Some(v.clone());
+                    sync_pass = Some(Some(v));
                 }
             }
-        }
-        "tls-port" => {
-            if let Ok(n) = val.parse() {
-                cfg.tls_port = n;
+            "appendonly" => {
+                cfg.persist.appendonly =
+                    matches!(val.to_ascii_lowercase().as_str(), "yes" | "1" | "true");
             }
-        }
-        "tls-cert-file" => {
-            cfg.tls_cert_file = if val.is_empty() {
-                None
-            } else {
-                Some(val.into_owned().into())
-            };
-        }
-        "tls-key-file" => {
-            cfg.tls_key_file = if val.is_empty() {
-                None
-            } else {
-                Some(val.into_owned().into())
-            };
-        }
-        "tls-ca-cert-file" => {
-            cfg.tls_ca_cert_file = if val.is_empty() {
-                None
-            } else {
-                Some(val.into_owned().into())
-            };
-        }
-        "tls-auth-clients" => cfg.tls_auth_clients = val.into_owned(),
-        "masterauth" => {
-            let v = val.into_owned();
-            if v.is_empty() {
-                ctx.repl.set_masterauth(None);
-            } else {
-                ctx.repl.set_masterauth(Some(v));
+            "appendfsync" => {
+                cfg.persist.appendfsync = val.clone().into_owned();
+                ctx.aof.set_fsync_policy(val.as_ref());
             }
-        }
-        "replica-read-only" => {
-            ctx.repl.set_replica_read_only(matches!(
-                val.to_ascii_lowercase().as_str(),
-                "yes" | "1" | "true"
-            ));
-        }
-        "slowlog-max-len" => {
-            if let Ok(n) = val.parse() {
-                cfg.slowlog.set_max_len(n);
+            "aof-use-rdb-preamble" => {
+                cfg.persist.aof_use_rdb_preamble =
+                    matches!(val.to_ascii_lowercase().as_str(), "yes" | "1" | "true");
             }
-        }
-        "slowlog-log-slower-than" => {
-            if let Ok(n) = val.parse::<i64>() {
-                let us = if n < 0 { u64::MAX } else { n as u64 };
-                cfg.slowlog.set_slower_than_us(us);
+            "dir" => cfg.persist.dir = val.into_owned().into(),
+            "dbfilename" => cfg.persist.dbfilename = val.into_owned(),
+            "appendfilename" => cfg.persist.appendfilename = val.into_owned(),
+            "protected-mode" => {
+                cfg.protected_mode =
+                    matches!(val.to_ascii_lowercase().as_str(), "yes" | "1" | "true");
             }
-        }
-        "latency-monitor-threshold" => {
-            if let Ok(n) = val.parse() {
-                cfg.latency.set_threshold_ms(n);
+            "maxmemory-policy" => {
+                if crate::eviction::MaxMemoryPolicy::parse(val.as_ref()).is_none() {
+                    return Err("ERR Invalid argument 'maxmemory-policy'".into());
+                }
+                cfg.maxmemory_policy = val.into_owned();
             }
-        }
-        "maxclients" => {
-            if let Ok(n) = val.parse() {
-                cfg.maxclients = n;
+            "activedefrag" => {
+                cfg.activedefrag =
+                    matches!(val.to_ascii_lowercase().as_str(), "yes" | "1" | "true");
             }
-        }
-        "timeout" | "tcp-keepalive" | "hz" | "maxmemory" | "port" => {
-            if let Ok(n) = val.parse() {
-                match name {
-                    "timeout" => cfg.timeout = n,
-                    "tcp-keepalive" => cfg.tcp_keepalive = n,
-                    "hz" => cfg.hz = n,
-                    "maxmemory" => cfg.maxmemory = n,
-                    "port" => cfg.port = n as u16,
-                    _ => {}
+            "storage-mode" => {
+                let mode = crate::storage::StorageMode::parse(val.as_ref());
+                cfg.storage_mode = mode.as_str().into();
+                ctx.storage.set_mode(mode);
+            }
+            "cluster-mode" => {
+                let c = crate::raft::ClusterConsistency::parse(val.as_ref());
+                cfg.cluster_consistency = c.as_str().into();
+                ctx.raft.set_consistency(c);
+            }
+            "compress-threshold" | "maxmemory-soft" | "aof-group-commit-ms" => {
+                if let Ok(n) = val.parse::<u64>() {
+                    match name {
+                        "compress-threshold" => {
+                            cfg.compress_threshold = n;
+                            ctx.storage
+                                .compress_threshold
+                                .store(n, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        "maxmemory-soft" => cfg.maxmemory_soft = n,
+                        "aof-group-commit-ms" => {
+                            cfg.aof_group_commit_ms = n;
+                            ctx.aof.set_group_commit_ms(n);
+                        }
+                        _ => {}
+                    }
                 }
             }
+            "unixsocket" => {
+                cfg.unixsocket = if val.is_empty() {
+                    None
+                } else {
+                    Some(val.into_owned())
+                };
+            }
+            "unixsocketperm" => cfg.unixsocketperm = val.into_owned(),
+            "io-threads" => {
+                if let Ok(n) = val.parse::<u64>() {
+                    cfg.io_threads = n.max(1);
+                    ctx.tracking.io_threads_hint.store(
+                        cfg.io_threads.clamp(1, 255) as u8,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if let Some(pool) = crate::io_threads::global() {
+                        pool.configure(cfg.io_threads as usize);
+                    }
+                }
+            }
+            "tls-port" => {
+                if let Ok(n) = val.parse() {
+                    cfg.tls_port = n;
+                }
+            }
+            "tls-cert-file" => {
+                cfg.tls_cert_file = if val.is_empty() {
+                    None
+                } else {
+                    Some(val.into_owned().into())
+                };
+            }
+            "tls-key-file" => {
+                cfg.tls_key_file = if val.is_empty() {
+                    None
+                } else {
+                    Some(val.into_owned().into())
+                };
+            }
+            "tls-ca-cert-file" => {
+                cfg.tls_ca_cert_file = if val.is_empty() {
+                    None
+                } else {
+                    Some(val.into_owned().into())
+                };
+            }
+            "tls-auth-clients" => cfg.tls_auth_clients = val.into_owned(),
+            "masterauth" => {
+                let v = val.into_owned();
+                if v.is_empty() {
+                    ctx.repl.set_masterauth(None);
+                } else {
+                    ctx.repl.set_masterauth(Some(v));
+                }
+            }
+            "replica-read-only" => {
+                ctx.repl.set_replica_read_only(matches!(
+                    val.to_ascii_lowercase().as_str(),
+                    "yes" | "1" | "true"
+                ));
+            }
+            "slowlog-max-len" => {
+                if let Ok(n) = val.parse() {
+                    cfg.slowlog.set_max_len(n);
+                }
+            }
+            "slowlog-log-slower-than" => {
+                if let Ok(n) = val.parse::<i64>() {
+                    let us = if n < 0 { u64::MAX } else { n as u64 };
+                    cfg.slowlog.set_slower_than_us(us);
+                }
+            }
+            "latency-monitor-threshold" => {
+                if let Ok(n) = val.parse() {
+                    cfg.latency.set_threshold_ms(n);
+                }
+            }
+            "maxclients" => {
+                if let Ok(n) = val.parse() {
+                    cfg.maxclients = n;
+                }
+            }
+            "timeout" | "tcp-keepalive" | "hz" | "maxmemory" | "port" => {
+                if let Ok(n) = val.parse() {
+                    match name {
+                        "timeout" => cfg.timeout = n,
+                        "tcp-keepalive" => cfg.tcp_keepalive = n,
+                        "hz" => cfg.hz = n,
+                        "maxmemory" => cfg.maxmemory = n,
+                        "port" => cfg.port = n as u16,
+                        _ => {}
+                    }
+                }
+            }
+            "bind" => {
+                cfg.bind = val.split_whitespace().map(String::from).collect();
+            }
+            _ => {}
         }
-        "bind" => {
-            cfg.bind = val.split_whitespace().map(String::from).collect();
-        }
-        _ => {}
-    }
     } // drop cfg write lock
     if let Some(p) = sync_pass {
         ctx.acl.sync_requirepass(p.as_deref());
@@ -860,10 +955,7 @@ pub(crate) fn cmd_command(args: &[Bytes]) -> RespValue {
                     .map(|c| c.to_string())
                     .collect()
             } else {
-                args[2..]
-                    .iter()
-                    .map(|b| upper(b))
-                    .collect()
+                args[2..].iter().map(|b| upper(b)).collect()
             };
             let mut out = Vec::new();
             for n in names {
@@ -924,11 +1016,7 @@ fn cmd_command_getkeys(args: &[Bytes]) -> RespValue {
 }
 
 fn slowlog_entry_resp(e: &SlowLogEntry) -> RespValue {
-    let mut argv: Vec<RespValue> = e
-        .args
-        .iter()
-        .map(|a| RespValue::bulk(a.clone()))
-        .collect();
+    let mut argv: Vec<RespValue> = e.args.iter().map(|a| RespValue::bulk(a.clone())).collect();
     RespValue::array(vec![
         RespValue::Integer(e.id as i64),
         RespValue::Integer(e.unix_time),
@@ -989,7 +1077,12 @@ pub(crate) fn cmd_latency(ctx: &CommandContext, _: &mut ClientState, args: &[Byt
     if (arity > 0 && n != arity) || (arity < 0 && n < -arity) {
         return wrong_arity(&format!("latency|{}", sub.to_ascii_lowercase()));
     }
-    let names = || args[2..].iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect::<Vec<_>>();
+    let names = || {
+        args[2..]
+            .iter()
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect::<Vec<_>>()
+    };
     let int = |v: u64| RespValue::Integer(v as i64);
     let cfg = ctx.config.read();
     let lat = &cfg.latency;
@@ -1082,13 +1175,20 @@ pub(crate) fn cmd_shutdown(ctx: &CommandContext, args: &[Bytes]) -> RespValue {
         ctx.config.read().control.request_shutdown(req);
         return err("ERR Shutdown aborted");
     }
-    if req.save && !req.nosave {
+    // Redis : SAVE forcé / défaut = dump ; NOSAVE = skip. On flush ici pour que
+    // le client reçoive SHUTDOWN après la persistance (comme redis-server).
+    if req.should_persist() {
         let path = {
             let cfg = ctx.config.read();
             cfg.persist.dir.join(&cfg.persist.dbfilename)
         };
-        if save_rdb(&path, &ctx.db).is_ok() {
-            mark_last_save(&ctx.config.read());
+        match save_rdb(&path, &ctx.db) {
+            Ok(()) => mark_last_save(&ctx.config.read()),
+            Err(e) => tracing::warn!("SHUTDOWN SAVE failed: {e}"),
+        }
+        // AOF : fsync final si actif.
+        if ctx.aof.enabled() {
+            let _ = ctx.aof.fsync_now();
         }
     }
     ctx.config.read().control.request_shutdown(req);
@@ -1114,7 +1214,6 @@ pub(crate) fn mark_last_save(cfg: &crate::command::ServerConfig) {
         .as_secs() as i64;
     cfg.last_save.store(t, Ordering::Relaxed);
 }
-
 
 /// MEMORY USAGE|STATS|DOCTOR|PURGE|MALLOC-STATS|HELP.
 pub(crate) fn cmd_memory(ctx: &CommandContext, state: &ClientState, args: &[Bytes]) -> RespValue {
@@ -1185,11 +1284,12 @@ pub(crate) fn cmd_memory(ctx: &CommandContext, state: &ClientState, args: &[Byte
                 text("allocator.resident"),
                 RespValue::Integer(used as i64),
                 text("allocator-fragmentation.ratio"),
-                text("1.00"),
+                text(format!("{:.2}", ctx.storage.mem.fragmentation_ratio())),
             ])
         }
         Some("DOCTOR") => {
             let used = ctx.db.approx_memory();
+            ctx.storage.mem.set_used(used as u64);
             let (keys, expires) = (0..ctx.db.db_count()).fold((0usize, 0usize), |(k, e), db| {
                 let (a, b) = ctx.db.key_stats(db);
                 (k + a, e + b)
@@ -1201,6 +1301,9 @@ pub(crate) fn cmd_memory(ctx: &CommandContext, state: &ClientState, args: &[Byte
             if used > 100 * 1024 * 1024 {
                 tips.push("Dataset is large; monitor maxmemory and fragmentation.");
             }
+            if ctx.storage.mem.fragmentation_ratio() > 1.5 {
+                tips.push("High fragmentation ratio; enable activedefrag or run MEMORY PURGE.");
+            }
             if tips.is_empty() {
                 text("Sam, I detect no memory issues at this time.")
             } else {
@@ -1208,7 +1311,12 @@ pub(crate) fn cmd_memory(ctx: &CommandContext, state: &ClientState, args: &[Byte
             }
         }
         Some("PURGE") => {
-            // Jemalloc purge n/a : no-op réussi (comme Redis sans jemalloc).
+            ctx.defrag.running.store(1, Ordering::Relaxed);
+            let moved = crate::mem::active_defrag_pass(&ctx.db, 256);
+            ctx.defrag.keys_moved.fetch_add(moved as u64, Ordering::Relaxed);
+            ctx.defrag.runs.fetch_add(1, Ordering::Relaxed);
+            ctx.defrag.running.store(0, Ordering::Relaxed);
+            ctx.storage.mem.record_defrag(moved as u64);
             RespValue::ok()
         }
         Some("MALLOC-STATS") => {
@@ -1238,10 +1346,76 @@ pub(crate) fn cmd_memory(ctx: &CommandContext, state: &ClientState, args: &[Byte
     }
 }
 
-/// FERREDIS EVENTS [n] | FERREDIS VERSION : extensions propres à Ferredis.
+/// DEBUG HELP | OBJECT key | RELOAD — sous-ensemble Redis (admin).
 ///
-/// `EVENTS` retourne, du plus récent au plus ancien, des tableaux
-/// `[temps_unix_ms, id_client, adresse, type, détail]`.
+/// Les sous-commandes destructives (`SEGFAULT`, `PANIC`, …) sont refusées
+/// explicitement plutôt que d'être silencieusement absentes.
+pub(crate) fn cmd_debug(
+    ctx: &CommandContext,
+    state: &mut ClientState,
+    args: &[Bytes],
+) -> RespValue {
+    if args.len() < 2 {
+        return wrong_arity("debug");
+    }
+    match upper(&args[1]).as_str() {
+        "HELP" => RespValue::array(
+            [
+                "DEBUG <subcommand> [<arg> ...]. Subcommands are:",
+                "HELP",
+                "    Shows this help.",
+                "OBJECT <key>",
+                "    Show low-level info about `key` (encoding, idle, freq).",
+                "RELOAD",
+                "    Reload the RDB file from disk (Ferredis).",
+            ]
+            .iter()
+            .map(|s| RespValue::bulk(Bytes::from_static(s.as_bytes())))
+            .collect(),
+        ),
+        "OBJECT" => {
+            if args.len() != 3 {
+                return wrong_arity("debug|object");
+            }
+            let key = &args[2];
+            ctx.db.with_db(state.db_index, |d| {
+                match d.get_fresh_notouch(key) {
+                    None => err("ERR no such key"),
+                    Some(e) => {
+                        // Format proche de Redis DEBUG OBJECT (champs utiles, pas d'adresse C).
+                        let s = format!(
+                            "Value at:ferredis refcount:1 encoding:{} serializedlength:{} lru_seconds_idle:{} lfu_freq:{}",
+                            e.object_encoding(),
+                            e.value.approx_bytes(),
+                            e.idle_secs(),
+                            e.lfu_freq,
+                        );
+                        RespValue::bulk(Bytes::from(s))
+                    }
+                }
+            })
+        }
+        "RELOAD" => {
+            let path = {
+                let cfg = ctx.config.read();
+                cfg.persist.dir.join(&cfg.persist.dbfilename)
+            };
+            match crate::persist::load_rdb(&path, &ctx.db) {
+                Ok(()) => RespValue::ok(),
+                Err(e) => RespValue::err(format!("ERR {e}")),
+            }
+        }
+        "SEGFAULT" | "PANIC" | "OOM" | "ASSERT" => {
+            err("ERR DEBUG subcommand disabled for safety in Ferredis")
+        }
+        other => RespValue::err(format!("ERR Unknown DEBUG subcommand '{other}'")),
+    }
+}
+
+/// FERREDIS EVENTS | VERSION | DATABASES — extensions propres à Ferredis.
+///
+/// `EVENTS` → `[temps_unix_ms, id_client, adresse, type, détail]` (récent → ancien).
+/// `DATABASES` → bases non vides : `[db, N, keys, K, expires, E]` par entrée.
 pub(crate) fn cmd_ferredis(ctx: &CommandContext, args: &[Bytes]) -> RespValue {
     match args.get(1).map(|a| upper(a)).as_deref() {
         Some("EVENTS") => {
@@ -1267,8 +1441,53 @@ pub(crate) fn cmd_ferredis(ctx: &CommandContext, args: &[Bytes]) -> RespValue {
             )
         }
         Some("VERSION") => text(env!("CARGO_PKG_VERSION")),
-        _ => err("ERR unknown subcommand. Try FERREDIS EVENTS [count] | FERREDIS VERSION."),
+        Some("DATABASES") | Some("DBS") => databases_reply(ctx),
+        Some("HELP") => RespValue::array(
+            [
+                "FERREDIS EVENTS [count]",
+                "FERREDIS VERSION",
+                "FERREDIS DATABASES | DBS",
+                "FERREDIS HELP",
+            ]
+            .iter()
+            .map(|s| RespValue::bulk(Bytes::from_static(s.as_bytes())))
+            .collect(),
+        ),
+        _ => err("ERR unknown subcommand. Try FERREDIS HELP | EVENTS | VERSION | DATABASES."),
     }
+}
+
+/// Liste les bases avec au moins une clé.
+///
+/// Format CLI clair (une entrée = une base) :
+/// `[["db", 0, "keys", 39, "expires", 34], …]`
+///
+/// Aussi exposé en commande top-level `DATABASES` (raccourci CLI).
+pub(crate) fn cmd_databases(
+    ctx: &CommandContext,
+    _state: &mut ClientState,
+    _args: &[Bytes],
+) -> RespValue {
+    databases_reply(ctx)
+}
+
+fn databases_reply(ctx: &CommandContext) -> RespValue {
+    let mut out = Vec::new();
+    for db in 0..ctx.db.db_count() {
+        let (keys, expires) = ctx.db.key_stats(db);
+        if keys == 0 {
+            continue;
+        }
+        out.push(RespValue::array(vec![
+            text("db"),
+            RespValue::Integer(db as i64),
+            text("keys"),
+            RespValue::Integer(keys as i64),
+            text("expires"),
+            RespValue::Integer(expires as i64),
+        ]));
+    }
+    RespValue::array(out)
 }
 
 /// Enregistre un échec AUTH (appelé par `cmd_auth`).

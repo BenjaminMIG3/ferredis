@@ -9,6 +9,18 @@ use std::path::Path;
 #[cfg(windows)]
 pub const WINDOWS_PIPE_HINT: &str = r"\\.\pipe\ferredis";
 
+/// Normalise le chemin local configuré (Unix : tel quel ; Windows : `\\.\pipe\…`).
+pub fn normalize_local_path(configured: &str) -> String {
+    #[cfg(windows)]
+    {
+        windows_pipe_path(configured)
+    }
+    #[cfg(not(windows))]
+    {
+        configured.to_string()
+    }
+}
+
 /// Valide le chemin avant bind.
 pub fn validate_unix_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
@@ -79,7 +91,7 @@ pub mod listener {
 
 #[cfg(windows)]
 pub mod listener {
-    use super::{validate_unix_path, windows_pipe_path};
+    use super::{normalize_local_path, validate_unix_path};
     use std::io;
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
@@ -92,7 +104,7 @@ pub mod listener {
 
     pub async fn bind(path: &str, _perm_octal: &str) -> io::Result<PipeListener> {
         validate_unix_path(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let path = windows_pipe_path(path);
+        let path = normalize_local_path(path);
         let server = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&path)?;

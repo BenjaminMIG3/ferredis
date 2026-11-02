@@ -40,6 +40,10 @@ const SUBCOMMANDS: &[(&str, &[&str])] = &[
         &["COUNT", "DOCS", "GETKEYS", "GETKEYSANDFLAGS", "INFO", "LIST"],
     ),
     (
+        "FERREDIS",
+        &["DATABASES", "DBS", "EVENTS", "HELP", "VERSION"],
+    ),
+    (
         "FUNCTION",
         &["DELETE", "DUMP", "FLUSH", "KILL", "LIST", "LOAD", "RESTORE", "STATS"],
     ),

@@ -21,6 +21,7 @@ const HINTS: &[(&str, &str)] = &[
     ("COMMAND", "[subcommand ...]"),
     ("CONFIG", "GET|SET|RESETSTAT|REWRITE [arg ...]"),
     ("COPY", "source destination [DB destination-db] [REPLACE]"),
+    ("DATABASES", ""),
     ("DBSIZE", ""),
     ("DECR", "key"),
     ("DECRBY", "key decrement"),
@@ -33,6 +34,7 @@ const HINTS: &[(&str, &str)] = &[
     ("EXISTS", "key [key ...]"),
     ("EXPIRE", "key seconds [NX|XX|GT|LT]"),
     ("EXPIREAT", "key timestamp [NX|XX|GT|LT]"),
+    ("FERREDIS", "EVENTS [count] | VERSION | DATABASES | HELP"),
     ("FLUSHALL", "[ASYNC|SYNC]"),
     ("FLUSHDB", "[ASYNC|SYNC]"),
     ("GEOADD", "key [NX|XX] [CH] longitude latitude member [longitude latitude member ...]"),
@@ -238,15 +240,23 @@ fn hint_suffix_for_partial(remaining: &str, token: &str) -> Option<String> {
     // ONEOF : NX|XX → si le token matche un préfixe
     for alt in bare.split('|') {
         let a = alt.trim_matches(|c| c == '[' || c == ']');
-        if a.to_ascii_uppercase().starts_with(&token.to_ascii_uppercase()) && a.len() > token.len() {
+        if a.to_ascii_uppercase()
+            .starts_with(&token.to_ascii_uppercase())
+            && a.len() > token.len()
+        {
             let rest = remaining.strip_prefix(first).unwrap_or("");
             return Some(format!("{}{}", &a[token.len()..], rest));
         }
     }
     // Placeholders (pattern, key…) : pas de suffixe inline, on garde le hint complet
-    if bare.chars().all(|c| c.is_ascii_lowercase() || c == '-' || c == '_') {
+    if bare
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '-' || c == '_')
+    {
         None
-    } else if bare.to_ascii_uppercase().starts_with(&token.to_ascii_uppercase())
+    } else if bare
+        .to_ascii_uppercase()
+        .starts_with(&token.to_ascii_uppercase())
         && bare.len() > token.len()
     {
         let rest = remaining.strip_prefix(first).unwrap_or("");
@@ -462,7 +472,8 @@ fn extract_completable_tokens(remaining: &str) -> Vec<String> {
 
 fn is_token_name(s: &str) -> bool {
     !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_')
         && s.chars().any(|c| c.is_ascii_alphabetic())
 }
 

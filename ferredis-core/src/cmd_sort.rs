@@ -195,7 +195,7 @@ fn sorted_elements(d: &mut DbInner, key: &Bytes, o: &mut SortOpts) -> Result<Vec
                 o.alpha = true;
                 o.by = None;
             }
-            s.iter().cloned().collect()
+            s.iter_members()
         }
         Some(RedisValue::ZSet(z)) => {
             if o.dontsort {

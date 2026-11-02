@@ -11,6 +11,8 @@ pub enum Segment {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Path {
+    /// `true` si le chemin commence par `$` (JSONPath RedisJSON → réponses en tableau).
+    pub jsonpath: bool,
     pub recursive: bool,
     pub segs: Vec<Segment>,
 }
@@ -21,25 +23,33 @@ impl Path {
         if s.is_empty() {
             return Err("ERR wrong path syntax");
         }
-        let (recursive, body) = if s == "$" || s == "." {
+        // Racines : `$` = JSONPath, `.` = legacy.
+        if s == "$" {
+            return Ok(Self::root_jsonpath());
+        }
+        if s == "." {
             return Ok(Self {
+                jsonpath: false,
                 recursive: false,
                 segs: Vec::new(),
             });
-        } else if let Some(rest) = s.strip_prefix("$..") {
-            (true, rest)
-        } else if let Some(rest) = s.strip_prefix("$") {
-            (false, rest)
+        }
+        let (jsonpath, recursive, body) = if let Some(rest) = s.strip_prefix("$..") {
+            (true, true, rest)
+        } else if let Some(rest) = s.strip_prefix('$') {
+            (true, false, rest)
         } else if s.starts_with('.') || s.starts_with('[') {
-            (false, s)
+            (false, false, s)
         } else {
             // chemin relatif style RedisJSON legacy `foo.bar`
             return Ok(Self {
+                jsonpath: false,
                 recursive: false,
                 segs: parse_segments(s)?,
             });
         };
         Ok(Self {
+            jsonpath,
             recursive,
             segs: if body.is_empty() {
                 Vec::new()
@@ -49,8 +59,22 @@ impl Path {
         })
     }
 
+    /// Racine JSONPath `$` (défaut RedisJSON).
+    pub fn root_jsonpath() -> Self {
+        Self {
+            jsonpath: true,
+            recursive: false,
+            segs: Vec::new(),
+        }
+    }
+
     pub fn is_root(&self) -> bool {
         !self.recursive && self.segs.is_empty()
+    }
+
+    #[inline]
+    pub fn is_jsonpath(&self) -> bool {
+        self.jsonpath
     }
 }
 
@@ -461,10 +485,32 @@ pub fn json_type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
         Value::Number(_) => "number",
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+/// Forme une réponse RedisJSON selon le type de path (DRY TYPE/ARRLEN/STRLEN/…).
+///
+/// - JSONPath (`$…`) → **toujours** un tableau (éventuellement vide)
+/// - legacy → scalaire ; miss → `miss_legacy` (souvent null bulk)
+pub fn reply_for_path(
+    path: &Path,
+    hits: Vec<crate::resp::RespValue>,
+    miss_legacy: crate::resp::RespValue,
+) -> crate::resp::RespValue {
+    use crate::resp::RespValue;
+    if path.is_jsonpath() {
+        RespValue::array(hits)
+    } else {
+        match hits.len() {
+            0 => miss_legacy,
+            1 => hits.into_iter().next().unwrap(),
+            _ => RespValue::array(hits),
+        }
     }
 }
 

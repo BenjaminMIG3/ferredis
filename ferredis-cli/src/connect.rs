@@ -1,12 +1,16 @@
-//! Connexion TCP / socket, AUTH, SELECT, HELLO, CLIENT SETNAME.
+//! Connexion TCP / socket local, AUTH, SELECT, HELLO, CLIENT SETNAME.
 
 use crate::args::Args;
 use crate::uri::parse_redis_uri;
 use anyhow::Context;
 use ferredis_core::server::{read_resp, write_command};
+use ferredis_core::unix_socket::normalize_local_path;
 use ferredis_core::RespValue;
 use std::io::{self, Write};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
@@ -24,30 +28,33 @@ pub struct Session {
 pub enum Conn {
     Tcp(TcpStream),
     #[cfg(unix)]
-    Unix(UnixStream),
+    Local(UnixStream),
+    #[cfg(windows)]
+    Local(NamedPipeClient),
 }
 
 impl Conn {
     pub async fn write_command(&mut self, args: &[&[u8]]) -> std::io::Result<()> {
         match self {
             Self::Tcp(s) => write_command(s, args).await,
-            #[cfg(unix)]
-            Self::Unix(s) => write_unix_command(s, args).await,
+            #[cfg(any(unix, windows))]
+            Self::Local(s) => write_local_command(s, args).await,
         }
     }
 
     pub async fn read_resp(&mut self) -> anyhow::Result<RespValue> {
         match self {
             Self::Tcp(s) => read_resp(s).await,
-            #[cfg(unix)]
-            Self::Unix(s) => read_unix_resp(s).await,
+            #[cfg(any(unix, windows))]
+            Self::Local(s) => read_local_resp(s).await,
         }
     }
 }
 
-#[cfg(unix)]
-async fn write_unix_command(socket: &mut UnixStream, args: &[&[u8]]) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
+async fn write_local_command<S: AsyncWrite + Unpin>(
+    socket: &mut S,
+    args: &[&[u8]],
+) -> std::io::Result<()> {
     let mut buf = Vec::new();
     buf.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
     for a in args {
@@ -58,11 +65,9 @@ async fn write_unix_command(socket: &mut UnixStream, args: &[&[u8]]) -> std::io:
     socket.write_all(&buf).await
 }
 
-#[cfg(unix)]
-async fn read_unix_resp(socket: &mut UnixStream) -> anyhow::Result<RespValue> {
+async fn read_local_resp<S: AsyncRead + Unpin>(socket: &mut S) -> anyhow::Result<RespValue> {
     use bytes::BytesMut;
     use ferredis_core::resp::{parse, RespError};
-    use tokio::io::AsyncReadExt;
     let mut buf = BytesMut::with_capacity(4096);
     loop {
         match parse(&mut buf) {
@@ -151,11 +156,7 @@ pub async fn connect(args: &Args) -> anyhow::Result<Session> {
     if let Some(pass) = &password {
         match &user {
             Some(u) => {
-                send_ok(
-                    &mut session,
-                    &[b"AUTH", u.as_bytes(), pass.as_bytes()],
-                )
-                .await?;
+                send_ok(&mut session, &[b"AUTH", u.as_bytes(), pass.as_bytes()]).await?;
             }
             None => {
                 send_ok(&mut session, &[b"AUTH", pass.as_bytes()]).await?;
@@ -168,11 +169,7 @@ pub async fn connect(args: &Args) -> anyhow::Result<Session> {
     }
 
     if let Some(name) = &args.client_name {
-        send_ok(
-            &mut session,
-            &[b"CLIENT", b"SETNAME", name.as_bytes()],
-        )
-        .await?;
+        send_ok(&mut session, &[b"CLIENT", b"SETNAME", name.as_bytes()]).await?;
     }
 
     Ok(session)
@@ -184,7 +181,6 @@ async fn connect_tcp(host: &str, port: u16, args: &Args) -> anyhow::Result<Conn>
         let s = if args.ipv4 {
             TcpStream::connect((host, port)).await?
         } else if args.ipv6 {
-            // Force IPv6 lookup by wrapping if needed
             TcpStream::connect(&addr).await?
         } else {
             TcpStream::connect(&addr).await?
@@ -203,26 +199,31 @@ async fn connect_tcp(host: &str, port: u16, args: &Args) -> anyhow::Result<Conn>
 }
 
 async fn connect_socket(path: &str, timeout_secs: f64) -> anyhow::Result<Conn> {
-    #[cfg(unix)]
-    {
-        let fut = async {
-            let s = UnixStream::connect(path).await?;
-            Ok::<_, anyhow::Error>(Conn::Unix(s))
-        };
-        if timeout_secs > 0.0 {
-            timeout(Duration::from_secs_f64(timeout_secs), fut)
-                .await
-                .context("connection timed out")?
-        } else {
-            fut.await
+    let normalized = normalize_local_path(path);
+    let fut = async {
+        #[cfg(unix)]
+        {
+            let s = UnixStream::connect(&normalized).await?;
+            Ok::<_, anyhow::Error>(Conn::Local(s))
         }
-        .with_context(|| format!("Could not connect to Redis at {path}"))
+        #[cfg(windows)]
+        {
+            let s = ClientOptions::new().open(&normalized)?;
+            Ok::<_, anyhow::Error>(Conn::Local(s))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            anyhow::bail!("local sockets (-s) are not supported on this platform")
+        }
+    };
+    if timeout_secs > 0.0 {
+        timeout(Duration::from_secs_f64(timeout_secs), fut)
+            .await
+            .context("connection timed out")?
+    } else {
+        fut.await
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, timeout_secs);
-        anyhow::bail!("Unix sockets (-s) are not supported on this platform");
-    }
+    .with_context(|| format!("Could not connect to Redis at {normalized}"))
 }
 
 pub async fn select_db(session: &mut Session, db: usize) -> anyhow::Result<()> {
@@ -251,7 +252,6 @@ async fn send_ok(session: &mut Session, args: &[&[u8]]) -> anyhow::Result<()> {
 fn ask_password() -> anyhow::Result<String> {
     eprint!("Please input password: ");
     io::stderr().flush()?;
-    // Pas de masquage natif portable sans dépendance ; stdin ligne (comme fallback).
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
@@ -267,14 +267,10 @@ impl Session {
     }
 
     /// Suit une redirection MOVED/ASK si cluster mode.
-    pub async fn follow_redirect_if_needed(
-        &mut self,
-        err: &str,
-    ) -> anyhow::Result<Option<()>> {
+    pub async fn follow_redirect_if_needed(&mut self, err: &str) -> anyhow::Result<Option<()>> {
         if !self.cluster {
             return Ok(None);
         }
-        // MOVED <slot> <host>:<port>  /  ASK <slot> <host>:<port>
         let parts: Vec<&str> = err.split_whitespace().collect();
         if parts.len() < 3 {
             return Ok(None);

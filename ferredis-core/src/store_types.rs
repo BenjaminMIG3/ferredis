@@ -7,7 +7,12 @@ use bytes::Bytes;
 use std::collections::HashSet;
 
 impl Database {
-    pub fn hset(&self, db: usize, key: &Bytes, fields: &[(Bytes, Bytes)]) -> Result<i64, &'static str> {
+    pub fn hset(
+        &self,
+        db: usize,
+        key: &Bytes,
+        fields: &[(Bytes, Bytes)],
+    ) -> Result<i64, &'static str> {
         let mut guard = self.dbs_write(db);
         if guard.purge_expired(key) {}
         match guard.map.get_mut(key) {
@@ -19,28 +24,43 @@ impl Database {
                         added += 1;
                     }
                 }
-                guard.map.insert(key.clone(), Entry::new(RedisValue::Hash(h)));
+                guard
+                    .map
+                    .insert(key.clone(), Entry::new(RedisValue::Hash(h)));
                 self.touch_dirty();
                 Ok(added)
             }
-            Some(e) => match &mut e.value {
-                RedisValue::Hash(h) => {
-                    h.purge_expired(now_unix_ms());
-                    let mut added = 0i64;
-                    for (f, v) in fields {
-                        if h.insert(f.clone(), v.clone()) {
-                            added += 1;
+            Some(e) => {
+                let added = match &mut e.value {
+                    RedisValue::Hash(h) => {
+                        h.purge_expired(now_unix_ms());
+                        let mut added = 0i64;
+                        for (f, v) in fields {
+                            if h.insert(f.clone(), v.clone()) {
+                                added += 1;
+                            }
                         }
+                        added
                     }
-                    self.touch_dirty();
-                    Ok(added)
-                }
-                _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
-            },
+                    _ => {
+                        return Err(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value",
+                        )
+                    }
+                };
+                e.mark_written();
+                self.touch_dirty();
+                Ok(added)
+            }
         }
     }
 
-    pub fn hget(&self, db: usize, key: &Bytes, field: &Bytes) -> Result<Option<Bytes>, &'static str> {
+    pub fn hget(
+        &self,
+        db: usize,
+        key: &Bytes,
+        field: &Bytes,
+    ) -> Result<Option<Bytes>, &'static str> {
         let mut guard = self.dbs_write(db);
         match guard.get_fresh_mut(key) {
             None => Ok(None),
@@ -128,7 +148,9 @@ impl Database {
             None => {
                 let mut h = HashObject::new();
                 h.insert(field.clone(), Bytes::from(delta.to_string()));
-                guard.map.insert(key.clone(), Entry::new(RedisValue::Hash(h)));
+                guard
+                    .map
+                    .insert(key.clone(), Entry::new(RedisValue::Hash(h)));
                 self.touch_dirty();
                 Ok(delta)
             }
@@ -155,12 +177,14 @@ impl Database {
         if guard.purge_expired(key) {}
         match guard.map.get_mut(key) {
             None => {
-                let mut s = HashSet::new();
+                let mut s = crate::encoding::SetObject::new();
                 for m in members {
                     s.insert(m.clone());
                 }
                 let n = s.len() as i64;
-                guard.map.insert(key.clone(), Entry::new(RedisValue::Set(s)));
+                guard
+                    .map
+                    .insert(key.clone(), Entry::new(RedisValue::Set(s)));
                 self.touch_dirty();
                 Ok(n)
             }
@@ -209,7 +233,7 @@ impl Database {
         match guard.get_fresh(key) {
             None => Ok(Vec::new()),
             Some(e) => match &e.value {
-                RedisValue::Set(s) => Ok(s.iter().cloned().collect()),
+                RedisValue::Set(s) => Ok(s.iter_members()),
                 _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
             },
         }
@@ -316,7 +340,12 @@ impl Database {
         }
     }
 
-    pub fn zscore(&self, db: usize, key: &Bytes, member: &Bytes) -> Result<Option<f64>, &'static str> {
+    pub fn zscore(
+        &self,
+        db: usize,
+        key: &Bytes,
+        member: &Bytes,
+    ) -> Result<Option<f64>, &'static str> {
         let mut guard = self.dbs_write(db);
         match guard.get_fresh(key) {
             None => Ok(None),
@@ -398,9 +427,10 @@ impl Database {
                 if value != 0 {
                     buf[byte_i] |= 1 << bit;
                 }
-                guard
-                    .map
-                    .insert(key.clone(), Entry::new(RedisValue::String(Bytes::from(buf))));
+                guard.map.insert(
+                    key.clone(),
+                    Entry::new(RedisValue::String(Bytes::from(buf))),
+                );
                 self.touch_dirty();
                 Ok(0)
             }
@@ -496,11 +526,15 @@ impl Database {
         self.touch();
     }
 
-    fn set_members(&self, guard: &mut crate::store::DbInner, key: &Bytes) -> Result<HashSet<Bytes>, &'static str> {
+    fn set_members(
+        &self,
+        guard: &mut crate::store::DbInner,
+        key: &Bytes,
+    ) -> Result<HashSet<Bytes>, &'static str> {
         match guard.get_fresh(key) {
             None => Ok(HashSet::new()),
             Some(e) => match &e.value {
-                RedisValue::Set(s) => Ok(s.clone()),
+                RedisValue::Set(s) => Ok(s.as_hashset()),
                 _ => Err(WRONGTYPE),
             },
         }

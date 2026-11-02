@@ -137,9 +137,11 @@ commands! {
     "COMMAND", -1, flags: ["loading", "stale"];
     "CONFIG", -2, flags: ["admin", "noscript", "loading", "stale"];
     "COPY", -3, flags: ["write", "denyoom"];
+    "DATABASES", 1, flags: ["readonly", "admin", "fast"], exec: One(server::cmd_databases);
     "DBSIZE", 1, flags: ["readonly", "fast"];
     "DECR", 2, flags: ["write", "denyoom", "fast"];
     "DECRBY", 3, flags: ["write", "denyoom", "fast"];
+    "DEBUG", -2, flags: ["admin", "noscript", "loading", "stale"], exec: One(server::cmd_debug);
     "DEL", -2, flags: ["write"];
     "DISCARD", 1, flags: ["noscript", "loading", "stale", "fast", "allow_busy"];
     "DUMP", 2, flags: ["readonly"], exec: One(crate::cmd_dump::cmd_dump);
@@ -157,6 +159,10 @@ commands! {
     "FERREDIS", -2, flags: ["admin", "fast"];
     "FLUSHALL", -1, flags: ["write"];
     "FLUSHDB", -1, flags: ["write"];
+    "FQ.DROPINDEX", 2, flags: ["write", "fast"], exec: One(crate::cmd_query::cmd_fq);
+    "FQ.INDEX", -7, flags: ["write", "denyoom"], exec: One(crate::cmd_query::cmd_fq);
+    "FQ.LIST", 1, flags: ["readonly", "fast"], exec: One(crate::cmd_query::cmd_fq);
+    "FQ.SELECT", -6, flags: ["readonly"], exec: One(crate::cmd_query::cmd_fq);
     "FCALL", -3, flags: ["noscript", "stale", "no_mandatory_keys"], exec: One(|c, s, a| crate::functions::cmd_fcall(c, s, a, false));
     "FCALL_RO", -3, flags: ["readonly", "noscript", "stale", "no_mandatory_keys"], exec: One(|c, s, a| crate::functions::cmd_fcall(c, s, a, true));
     "FT._LIST", 1, flags: ["readonly"], exec: One(search::cmd_ft_list);
@@ -230,6 +236,7 @@ commands! {
     "INCR", 2, flags: ["write", "denyoom", "fast"];
     "INCRBY", 3, flags: ["write", "denyoom", "fast"];
     "INCRBYFLOAT", 3, flags: ["write", "denyoom", "fast"];
+    "INDEX", -2, flags: ["write", "denyoom"], exec: One(crate::cmd_query::cmd_index);
     "INFO", -1, flags: ["loading", "stale"];
     "JSON.ARRAPPEND", -4, flags: ["write", "denyoom"], exec: One(json::cmd_json_arrappend);
     "JSON.ARRINDEX", -4, flags: ["readonly"], exec: One(json::cmd_json_arrindex);

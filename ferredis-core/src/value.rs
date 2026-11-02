@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1031,7 +1031,7 @@ pub enum RedisValue {
     String(Bytes),
     List(VecDeque<Bytes>),
     Hash(HashObject),
-    Set(HashSet<Bytes>),
+    Set(crate::encoding::SetObject),
     ZSet(ZSet),
     Stream(Stream),
     /// Document JSON (RedisJSON) — `TYPE` = `ReJSON-RL`.
@@ -1096,7 +1096,7 @@ impl RedisValue {
                 .iter()
                 .map(|(k, f)| k.len() + f.value.len() + 40)
                 .sum(),
-            Self::Set(s) => s.iter().map(|b| b.len() + 24).sum(),
+            Self::Set(s) => s.approx_bytes(),
             Self::ZSet(z) => z.members.keys().map(|b| b.len() + 56).sum(),
             Self::Stream(s) => {
                 let entries: usize = s
@@ -1162,6 +1162,12 @@ impl Entry {
         }
     }
 
+    /// Invalide les clients WATCH : toute mutation de contenu doit l'appeler (DRY).
+    #[inline]
+    pub fn mark_written(&mut self) {
+        self.version = NEXT_VERSION.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
     /// Met à jour LRU/LFU (sauf CLIENT NO-TOUCH).
     pub fn record_access(&mut self) {
         self.last_access = Instant::now();
@@ -1175,24 +1181,27 @@ impl Entry {
         self.last_access.elapsed().as_secs() as i64
     }
 
-    /// Encoding Redis-like dérivé de la forme (seuils embstr/listpack — DRY OBJECT).
+    /// Encoding réel (intset/listpack/…) — plus un simple label de seuil.
     pub fn object_encoding(&self) -> &'static str {
         use RedisValue::*;
         match &self.value {
+            String(s) if crate::mem::is_compressed_payload(s) => "raw",
             String(s) if std::str::from_utf8(s).ok().and_then(|t| t.parse::<i64>().ok()).is_some() => {
                 "int"
             }
             String(s) if s.len() <= 44 => "embstr",
             String(_) => "raw",
-            List(l) if l.len() <= 128 => "quicklist",
+            List(l) if l.len() <= 128 => "listpack",
             List(_) => "quicklist",
-            Hash(h) if h.live_len() <= 64 => "listpack",
-            Hash(_) => "hashtable",
-            Set(s) if s.iter().all(|m| std::str::from_utf8(m).ok().and_then(|t| t.parse::<i64>().ok()).is_some()) => {
-                "intset"
+            Hash(h) if h.live_len() <= crate::encoding::HASH_LISTPACK_MAX_ENTRIES
+                && h.iter_live().all(|(k, v)| {
+                    crate::encoding::ListPackHash::fits_entry(k, v)
+                }) =>
+            {
+                "listpack"
             }
-            Set(s) if s.len() <= 128 => "listpack",
-            Set(_) => "hashtable",
+            Hash(_) => "hashtable",
+            Set(s) => s.encoding(),
             ZSet(z) if z.len() <= 128 => "listpack",
             ZSet(_) => "skiplist",
             Stream(_) => "stream",

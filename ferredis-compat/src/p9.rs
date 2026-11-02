@@ -25,7 +25,10 @@ async fn module_list_embeds_stack() {
     assert!(r.contains("search"), "{r}");
     // P10 modules also listed; stack trio still required.
     let load = dbg(&cmd(&mut c, &["MODULE", "LOAD", "x.so"]).await);
-    assert!(load.contains("not supported") || load.contains("ERR"), "{load}");
+    assert!(
+        load.contains("not supported") || load.contains("ERR"),
+        "{load}"
+    );
 }
 
 #[tokio::test]
@@ -33,7 +36,11 @@ async fn json_set_get_del_type() {
     let addr = spawn_test_server().await;
     let mut c = TcpStream::connect(addr).await.unwrap();
     assert_eq!(
-        cmd(&mut c, &["JSON.SET", "doc", "$", r#"{"a":1,"b":[true,"x"]}"#]).await,
+        cmd(
+            &mut c,
+            &["JSON.SET", "doc", "$", r#"{"a":1,"b":[true,"x"]}"#]
+        )
+        .await,
         RespValue::ok()
     );
     assert_eq!(
@@ -42,13 +49,14 @@ async fn json_set_get_del_type() {
     );
     let got = cmd(&mut c, &["JSON.GET", "doc", "$.a"]).await;
     assert!(dbg(&got).contains('1'), "{got:?}");
+    // RedisJSON JSONPath (`$…`) → toujours un tableau de matches.
     assert_eq!(
         cmd(&mut c, &["JSON.TYPE", "doc", "$.b"]).await,
-        RespValue::bulk(Bytes::from_static(b"array"))
+        RespValue::array(vec![RespValue::bulk(Bytes::from_static(b"array"))])
     );
     assert_eq!(
         cmd(&mut c, &["JSON.ARRLEN", "doc", "$.b"]).await,
-        RespValue::Integer(2)
+        RespValue::array(vec![RespValue::Integer(2)])
     );
     let incr = dbg(&cmd(&mut c, &["JSON.NUMINCRBY", "doc", "$.a", "2"]).await);
     assert!(incr.contains('3'), "{incr}");
@@ -65,7 +73,15 @@ async fn timeseries_create_add_range() {
     assert_eq!(
         cmd(
             &mut c,
-            &["TS.CREATE", "temp", "LABELS", "sensor", "a", "RETENTION", "0"]
+            &[
+                "TS.CREATE",
+                "temp",
+                "LABELS",
+                "sensor",
+                "a",
+                "RETENTION",
+                "0"
+            ]
         )
         .await,
         RespValue::ok()
@@ -84,14 +100,15 @@ async fn timeseries_create_add_range() {
     );
     let range = dbg(&cmd(&mut c, &["TS.RANGE", "temp", "-", "+"]).await);
     assert!(range.contains("1000") && range.contains("2000"), "{range}");
-    let agg = dbg(
-        &cmd(
-            &mut c,
-            &["TS.RANGE", "temp", "-", "+", "AGGREGATION", "avg", "1000"],
-        )
-        .await,
+    let agg = dbg(&cmd(
+        &mut c,
+        &["TS.RANGE", "temp", "-", "+", "AGGREGATION", "avg", "1000"],
+    )
+    .await);
+    assert!(
+        agg.contains("1000") || agg.contains("1.5") || agg.contains("2"),
+        "{agg}"
     );
-    assert!(agg.contains("1000") || agg.contains("1.5") || agg.contains("2"), "{agg}");
     let qi = dbg(&cmd(&mut c, &["TS.QUERYINDEX", "sensor=a"]).await);
     assert!(qi.contains("temp"), "{qi}");
 }
@@ -101,11 +118,19 @@ async fn search_create_and_search_hash() {
     let addr = spawn_test_server().await;
     let mut c = TcpStream::connect(addr).await.unwrap();
     assert_eq!(
-        cmd(&mut c, &["HSET", "blog:1", "title", "hello", "body", "world redis"]).await,
+        cmd(
+            &mut c,
+            &["HSET", "blog:1", "title", "hello", "body", "world redis"]
+        )
+        .await,
         RespValue::Integer(2)
     );
     assert_eq!(
-        cmd(&mut c, &["HSET", "blog:2", "title", "other", "body", "stack"]).await,
+        cmd(
+            &mut c,
+            &["HSET", "blog:2", "title", "other", "body", "stack"]
+        )
+        .await,
         RespValue::Integer(2)
     );
     assert_eq!(
@@ -133,12 +158,21 @@ async fn search_create_and_search_hash() {
     assert!(list.contains("idx"), "{list}");
     let res = dbg(&cmd(&mut c, &["FT.SEARCH", "idx", "hello"]).await);
     assert!(res.contains("blog:1"), "{res}");
-    let agg = dbg(
-        &cmd(
-            &mut c,
-            &["FT.AGGREGATE", "idx", "*", "GROUPBY", "0", "REDUCE", "COUNT", "0", "AS", "n"],
-        )
-        .await,
-    );
+    let agg = dbg(&cmd(
+        &mut c,
+        &[
+            "FT.AGGREGATE",
+            "idx",
+            "*",
+            "GROUPBY",
+            "0",
+            "REDUCE",
+            "COUNT",
+            "0",
+            "AS",
+            "n",
+        ],
+    )
+    .await);
     assert!(agg.contains('2') || agg.contains('n'), "{agg}");
 }

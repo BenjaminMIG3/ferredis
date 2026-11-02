@@ -61,8 +61,6 @@ Clients Redis standards (`redis-cli`, `redis-py`, etc.) fonctionnent via `REDIS_
 cargo test --workspace --exclude ferredis-gui
 ```
 
-CI : Ubuntu + Windows (`cargo test` + build server/cli).
-
 ## Packaging
 
 ```bash

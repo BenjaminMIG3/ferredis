@@ -50,6 +50,10 @@ pub struct AofLogger {
     /// Génération au moment du dernier append (cible WAITAOF local).
     pending_gen: AtomicU64,
     last_fsync: Mutex<Instant>,
+    /// Group commit : retarde le fsync ALWAYS de N ms pour batcher.
+    group_commit_ms: AtomicU64,
+    /// Buffer de commandes en attente de fsync groupé.
+    pending_bytes: Mutex<usize>,
 }
 
 impl AofLogger {
@@ -73,6 +77,8 @@ impl AofLogger {
             fsync_gen: AtomicU64::new(0),
             pending_gen: AtomicU64::new(0),
             last_fsync: Mutex::new(Instant::now()),
+            group_commit_ms: AtomicU64::new(0),
+            pending_bytes: Mutex::new(0),
         };
         if cfg.appendonly && cfg.appendfsync.eq_ignore_ascii_case("everysec") {
             logger.spawn_everysec_fsync();
@@ -86,6 +92,14 @@ impl AofLogger {
 
     pub fn set_fsync_policy(&self, policy: &str) {
         *self.fsync_policy.lock() = policy.to_string();
+    }
+
+    pub fn set_group_commit_ms(&self, ms: u64) {
+        self.group_commit_ms.store(ms, Ordering::Relaxed);
+    }
+
+    pub fn group_commit_ms(&self) -> u64 {
+        self.group_commit_ms.load(Ordering::Relaxed)
     }
 
     pub fn fsync_gen(&self) -> u64 {
@@ -119,6 +133,7 @@ impl AofLogger {
         if let Some(f) = self.inner.lock().as_mut() {
             let _ = f.write_all(&buf);
             let _ = f.flush();
+            *self.pending_bytes.lock() += buf.len();
             let next = self.fsync_gen.load(Ordering::Relaxed).saturating_add(1);
             self.pending_gen.store(next, Ordering::Release);
             self.maybe_fsync(f);
@@ -128,13 +143,26 @@ impl AofLogger {
     fn maybe_fsync(&self, f: &mut File) {
         let policy = self.fsync_policy.lock().clone();
         if policy.eq_ignore_ascii_case("always") {
-            let _ = f.sync_data();
-            self.bump_fsync();
+            let gc = self.group_commit_ms();
+            if gc > 0 {
+                let mut last = self.last_fsync.lock();
+                if last.elapsed() < Duration::from_millis(gc) {
+                    return; // batch : fsync différé
+                }
+                let _ = f.sync_data();
+                *last = Instant::now();
+                *self.pending_bytes.lock() = 0;
+                self.bump_fsync();
+            } else {
+                let _ = f.sync_data();
+                self.bump_fsync();
+            }
         } else if policy.eq_ignore_ascii_case("everysec") {
             let mut last = self.last_fsync.lock();
             if last.elapsed() >= Duration::from_secs(1) {
                 let _ = f.sync_data();
                 *last = Instant::now();
+                *self.pending_bytes.lock() = 0;
                 self.bump_fsync();
             }
         }
@@ -271,7 +299,7 @@ fn write_entry_as_aof(f: &mut File, key: &Bytes, entry: &Entry) -> std::io::Resu
             }
         }
         RedisValue::Set(s) => {
-            for m in s {
+            for m in s.iter_members() {
                 write_cmd(f, &[b"SADD", key.as_ref(), m.as_ref()])?;
             }
         }

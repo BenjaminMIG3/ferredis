@@ -19,7 +19,11 @@ pub fn cmd_hset(ctx: &CommandContext, state: &ClientState, args: &[Bytes]) -> Re
     }
     match ctx.db.hset(state.db_index, &args[1], &fields) {
         Ok(n) => {
+            for (f, v) in &fields {
+                crate::cmd_query::notify_hash_field(ctx, &args[1], f, v);
+            }
             ctx.propagate(args);
+            ctx.apply_durability(state);
             ctx.notify_key(state.db_index, &args[1], "hset");
             RespValue::Integer(n)
         }
@@ -335,16 +339,22 @@ pub fn cmd_save(ctx: &CommandContext) -> RespValue {
         let cfg = ctx.config.read();
         cfg.persist.dir.join(&cfg.persist.dbfilename)
     };
-    match crate::persist::save_rdb_with_stack(
-        &path,
-        &ctx.db,
-        Some(&ctx.functions),
-        Some(&ctx.search),
-    ) {
-        Ok(()) => {
-            crate::cmd_server::mark_last_save(&ctx.config.read());
-            RespValue::ok()
-        }
+    let db = Arc::clone(&ctx.db);
+    let fns = Arc::clone(&ctx.functions);
+    let search = Arc::clone(&ctx.search);
+    let cfg = Arc::clone(&ctx.config);
+    let run = move || {
+        crate::persist::save_rdb_with_stack(&path, &db, Some(&fns), Some(&search)).map(|_| {
+            crate::cmd_server::mark_last_save(&cfg.read());
+        })
+    };
+    let result = if let Some(pool) = crate::io_threads::global() {
+        pool.run_blocking(run)
+    } else {
+        run()
+    };
+    match result {
+        Ok(()) => RespValue::ok(),
         Err(e) => RespValue::err(format!("ERR {e}")),
     }
 }
@@ -457,8 +467,15 @@ pub fn cmd_watch(ctx: &CommandContext, state: &mut ClientState, args: &[Bytes]) 
         if state.watched.iter().any(|w| w.db == db && &w.key == key) {
             continue;
         }
-        let snapshot = ctx.db.with_db(db, |d| d.get_fresh(key).cloned());
-        state.watched.push(WatchedKey { db, key: key.clone(), snapshot });
+        // notouch : un WATCH ne doit pas lui-même « salir » la clé via LRU.
+        let version = ctx
+            .db
+            .with_db(db, |d| d.get_fresh_notouch(key).map(|e| e.version));
+        state.watched.push(WatchedKey {
+            db,
+            key: key.clone(),
+            version,
+        });
     }
     RespValue::ok()
 }
@@ -468,10 +485,12 @@ pub fn cmd_unwatch(state: &mut ClientState) -> RespValue {
     RespValue::ok()
 }
 
-/// `true` si une clé surveillée a changé depuis le WATCH.
+/// `true` si une clé surveillée a été **écrite** depuis le WATCH (sémantique Redis).
 pub fn watched_keys_changed(ctx: &CommandContext, watched: &[WatchedKey]) -> bool {
     watched.iter().any(|w| {
-        let current = ctx.db.with_db(w.db, |d| d.get_fresh(&w.key).cloned());
-        current != w.snapshot
+        let current = ctx
+            .db
+            .with_db(w.db, |d| d.get_fresh_notouch(&w.key).map(|e| e.version));
+        current != w.version
     })
 }

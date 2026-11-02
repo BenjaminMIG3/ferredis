@@ -78,22 +78,59 @@ impl FerredisServer {
     }
 
     pub async fn serve(self, addr: SocketAddr) -> std::io::Result<()> {
-        if let Err(e) = self.load_persistence().await {
-            warn!("persistence load: {e}");
+        self.serve_addrs(&[addr]).await
+    }
+
+    /// Écoute TCP sur toutes les adresses (multi-bind), plus TLS / socket local.
+    pub async fn serve_addrs(self, addrs: &[SocketAddr]) -> std::io::Result<()> {
+        match self.load_persistence().await {
+            Ok(()) => {
+                let persist = self.ctx.config.read().persist.clone();
+                let path = if self.ctx.aof.enabled() {
+                    persist.dir.join(&persist.appendfilename)
+                } else {
+                    persist.dir.join(&persist.dbfilename)
+                };
+                info!(
+                    "persistence ready (dir={}, file={}, keys≈{})",
+                    persist.dir.display(),
+                    path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+                    self.ctx.db.dbsize(0)
+                );
+            }
+            Err(e) => warn!("persistence load FAILED — starting empty: {e}"),
         }
 
-        let listener = TcpListener::bind(addr).await?;
-        let local = listener.local_addr()?;
-        *self.ctx.config.read().listen_addr.lock() = local.to_string();
-        info!("Ferredis listening on {local}");
+        if addrs.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no listen addresses",
+            ));
+        }
+
+        let mut listeners = Vec::with_capacity(addrs.len());
+        for addr in addrs {
+            let listener = TcpListener::bind(addr).await?;
+            let local = listener.local_addr()?;
+            info!("Ferredis listening on {local}");
+            listeners.push(listener);
+        }
+        let primary = listeners[0].local_addr()?;
+        *self.ctx.config.read().listen_addr.lock() = primary.to_string();
+
+        let (tcp_tx, mut tcp_rx) = unbounded_channel::<(TcpStream, SocketAddr)>();
+        for listener in listeners {
+            spawn_tcp_accept(listener, tcp_tx.clone());
+        }
+        drop(tcp_tx);
 
         let tls_acceptor = prepare_tls(&self.ctx);
         let tls_listener = prepare_tls_listener(&self.ctx, tls_acceptor.as_ref()).await?;
 
         #[cfg(unix)]
-        let mut unix_listener = prepare_unix_listener(&self.ctx).await?;
+        let unix_listener = prepare_local_listener(&self.ctx).await?;
         #[cfg(windows)]
-        let mut pipe_listener = prepare_pipe_listener(&self.ctx).await?;
+        let mut pipe_listener = prepare_local_listener(&self.ctx).await?;
 
         spawn_expiry_task(&self.ctx, 20);
         spawn_autosave_task(&self.ctx);
@@ -118,13 +155,21 @@ impl FerredisServer {
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         if let Some(req) = self.ctx.config.read().control.take_shutdown() {
-                            if req.save && !req.nosave {
+                            // Save déjà fait dans cmd_shutdown pour le chemin commande ;
+                            // ici on couvre Ctrl+C / signaux (should_persist défaut).
+                            if req.should_persist() {
                                 let path = {
                                     let cfg = self.ctx.config.read();
                                     cfg.persist.dir.join(&cfg.persist.dbfilename)
                                 };
-                                if save_rdb(&path, &self.ctx.db).is_ok() {
-                                    crate::cmd_server::mark_last_save(&self.ctx.config.read());
+                                match save_rdb(&path, &self.ctx.db) {
+                                    Ok(()) => {
+                                        crate::cmd_server::mark_last_save(&self.ctx.config.read());
+                                        if self.ctx.aof.enabled() {
+                                            let _ = self.ctx.aof.fsync_now();
+                                        }
+                                    }
+                                    Err(e) => warn!("shutdown save failed: {e}"),
                                 }
                             }
                         }
@@ -132,19 +177,9 @@ impl FerredisServer {
                         break;
                     }
                 }
-                accept = listener.accept() => {
-                    let Ok((socket, peer)) = accept else { continue };
-                    if reject_protected(&self.ctx, peer) {
-                        self.ctx.clients.record_rejected(peer.to_string(), "protected mode");
-                        continue;
-                    }
-                    debug!("accepted connection from {peer}");
-                    let ctx = self.ctx.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_tcp(socket, ctx, peer).await {
-                            debug!("connection {peer} closed: {e}");
-                        }
-                    });
+                accept = tcp_rx.recv() => {
+                    let Some((socket, peer)) = accept else { break };
+                    spawn_accepted_tcp(&self.ctx, socket, peer);
                 }
                 accept = async {
                     match &tls_listener {
@@ -213,6 +248,58 @@ impl FerredisServer {
     }
 }
 
+/// Construit les adresses d'écoute depuis `bind` × `port` (fallback `127.0.0.1`).
+pub fn resolve_listen_addrs(config: &ServerConfig) -> Result<Vec<SocketAddr>, String> {
+    let hosts: Vec<&str> = if config.bind.is_empty() {
+        vec!["127.0.0.1"]
+    } else {
+        config.bind.iter().map(String::as_str).collect()
+    };
+    let mut out = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        let addr: SocketAddr = format!("{host}:{}", config.port)
+            .parse()
+            .map_err(|e| format!("invalid bind {host}:{}: {e}", config.port))?;
+        out.push(addr);
+    }
+    Ok(out)
+}
+
+fn spawn_tcp_accept(
+    listener: TcpListener,
+    tx: tokio::sync::mpsc::UnboundedSender<(TcpStream, SocketAddr)>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok(pair) => {
+                    if tx.send(pair).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    debug!("tcp accept error: {e}");
+                }
+            }
+        }
+    });
+}
+
+fn spawn_accepted_tcp(ctx: &CommandContext, socket: TcpStream, peer: SocketAddr) {
+    if reject_protected(ctx, peer) {
+        ctx.clients
+            .record_rejected(peer.to_string(), "protected mode");
+        return;
+    }
+    debug!("accepted connection from {peer}");
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handle_tcp(socket, ctx, peer).await {
+            debug!("connection {peer} closed: {e}");
+        }
+    });
+}
+
 fn prepare_tls(ctx: &CommandContext) -> Option<tokio_rustls::TlsAcceptor> {
     let cfg = ctx.config.read();
     let (Some(cert), Some(key)) = (&cfg.tls_cert_file, &cfg.tls_key_file) else {
@@ -268,8 +355,9 @@ async fn prepare_tls_listener(
     Ok(Some(listener))
 }
 
+/// Bind socket local si `unixsocket` est configuré ; échec = erreur fatale.
 #[cfg(unix)]
-async fn prepare_unix_listener(
+async fn prepare_local_listener(
     ctx: &CommandContext,
 ) -> std::io::Result<Option<tokio::net::UnixListener>> {
     let cfg = ctx.config.read();
@@ -277,42 +365,24 @@ async fn prepare_unix_listener(
         return Ok(None);
     };
     let perm = cfg.unixsocketperm.clone();
-    match crate::unix_socket::listener::bind(&path, &perm).await {
-        Ok(l) => {
-            info!("Ferredis unixsocket listening on {path}");
-            Ok(Some(l))
-        }
-        Err(e) => {
-            warn!("unixsocket {path}: {e}");
-            Ok(None)
-        }
-    }
+    let listener = crate::unix_socket::listener::bind(&path, &perm).await?;
+    info!("Ferredis unixsocket listening on {path}");
+    Ok(Some(listener))
 }
 
+/// Bind named pipe si `unixsocket` est configuré ; échec = erreur fatale.
 #[cfg(windows)]
-async fn prepare_pipe_listener(
+async fn prepare_local_listener(
     ctx: &CommandContext,
 ) -> std::io::Result<Option<crate::unix_socket::listener::PipeListener>> {
     let cfg = ctx.config.read();
-    let path = cfg
-        .unixsocket
-        .clone()
-        .unwrap_or_else(|| crate::unix_socket::WINDOWS_PIPE_HINT.to_string());
-    // Sur Windows, n'active le pipe que si unixsocket est configuré.
-    if cfg.unixsocket.is_none() {
+    let Some(path) = cfg.unixsocket.clone() else {
         return Ok(None);
-    }
+    };
     let perm = cfg.unixsocketperm.clone();
-    match crate::unix_socket::listener::bind(&path, &perm).await {
-        Ok(l) => {
-            info!("Ferredis named pipe listening on {path}");
-            Ok(Some(l))
-        }
-        Err(e) => {
-            warn!("named pipe {path}: {e}");
-            Ok(None)
-        }
-    }
+    let listener = crate::unix_socket::listener::bind(&path, &perm).await?;
+    info!("Ferredis named pipe listening on {path}");
+    Ok(Some(listener))
 }
 
 fn reject_protected(ctx: &CommandContext, peer: SocketAddr) -> bool {
@@ -344,8 +414,12 @@ fn spawn_autosave_task(ctx: &CommandContext) {
     let cfg = Arc::clone(&ctx.config);
     tokio::spawn(async move {
         let mut last_dirty = 0u64;
+        // Intervalle court : un redémarrage avant le premier dump ne doit pas
+        // tout perdre (Redis a des save points ; ici dirty→disk périodique).
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tick.tick().await;
             let dirty = db.dirty.load(std::sync::atomic::Ordering::Relaxed);
             if dirty != last_dirty {
                 let path = cfg.read().persist.dir.join(&cfg.read().persist.dbfilename);
@@ -407,8 +481,8 @@ where
     let tracking = ctx.tracking.session(info.id);
     tracking.attach_push(push_tx);
 
-    let authenticated = ctx.config.read().requirepass.is_none()
-        && ctx.acl.authenticate("default", "").is_ok();
+    let authenticated =
+        ctx.config.read().requirepass.is_none() && ctx.acl.authenticate("default", "").is_ok();
     let mut state = ClientState {
         authenticated,
         pubsub_id: Some(pubsub_id),
@@ -416,8 +490,15 @@ where
         ..Default::default()
     };
 
-    let result =
-        connection_loop(&mut socket, &ctx, &mut state, &info, &mut pubsub_rx, &mut push_rx).await;
+    let result = connection_loop(
+        &mut socket,
+        &ctx,
+        &mut state,
+        &info,
+        &mut pubsub_rx,
+        &mut push_rx,
+    )
+    .await;
 
     if state.is_replica_conn {
         ctx.repl.remove_replica(info.id);
@@ -761,20 +842,67 @@ pub async fn spawn_test_server_with(config: ServerConfig) -> SocketAddr {
         let port = addr.port();
         server.ctx.cluster.enable(&host, port);
     }
+
+    #[cfg(any(unix, windows))]
+    let local_listener = prepare_local_listener(&server.ctx)
+        .await
+        .expect("local listener");
+
     tokio::spawn(async move {
         spawn_expiry_task(&server.ctx, 10);
         crate::sentinel::spawn_sentinel_loop(server.ctx.clone());
+
+        let (tcp_tx, mut tcp_rx) = unbounded_channel();
+        spawn_tcp_accept(listener, tcp_tx);
+
+        #[cfg(unix)]
+        let unix_listener = local_listener;
+        #[cfg(windows)]
+        let mut pipe_listener = local_listener;
+
         loop {
-            match listener.accept().await {
-                Ok((socket, peer)) => {
+            tokio::select! {
+                accept = tcp_rx.recv() => {
+                    let Some((socket, peer)) = accept else { break };
                     let ctx = server.ctx.clone();
                     tokio::spawn(async move {
                         let _ = handle_tcp(socket, ctx, peer).await;
                     });
                 }
-                Err(e) => {
-                    error!("accept error: {e}");
-                    break;
+                accept = async {
+                    #[cfg(unix)]
+                    {
+                        match &unix_listener {
+                            Some(l) => Some(crate::unix_socket::listener::accept(l).await),
+                            None => std::future::pending::<Option<std::io::Result<_>>>().await,
+                        }
+                    }
+                    #[cfg(windows)]
+                    {
+                        match &mut pipe_listener {
+                            Some(l) => Some(crate::unix_socket::listener::accept(l).await),
+                            None => std::future::pending::<Option<std::io::Result<_>>>().await,
+                        }
+                    }
+                    #[cfg(not(any(unix, windows)))]
+                    {
+                        let _: () = std::future::pending().await;
+                        None
+                    }
+                }, if {
+                    #[cfg(unix)]
+                    { unix_listener.is_some() }
+                    #[cfg(windows)]
+                    { pipe_listener.is_some() }
+                    #[cfg(not(any(unix, windows)))]
+                    { false }
+                } => {
+                    let Some(Ok((stream, peer))) = accept else { continue };
+                    let ctx = server.ctx.clone();
+                    let laddr = peer.clone();
+                    tokio::spawn(async move {
+                        let _ = handle_stream(stream, ctx, peer, laddr).await;
+                    });
                 }
             }
         }

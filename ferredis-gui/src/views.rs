@@ -94,8 +94,25 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(theme::primary_button("Connecter")).clicked() {
-                        app.reconnect();
+                    // Session client (indépendante du process serveur).
+                    let (label, hint) = if app.session_active && app.connected {
+                        (
+                            "Déconnecter",
+                            "Ferme la session GUI — le serveur local continue s'il tourne",
+                        )
+                    } else {
+                        (
+                            "Connecter",
+                            "Ouvre une session sur l'hôte/port sélectionnés",
+                        )
+                    };
+                    let btn = if app.session_active && app.connected {
+                        theme::ghost_button(label)
+                    } else {
+                        theme::primary_button(label)
+                    };
+                    if ui.add(btn).on_hover_text(hint).clicked() {
+                        app.toggle_session();
                     }
 
                     server_controls(app, ui);
@@ -121,10 +138,9 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                             .speed(1),
                     );
                     ui.label(muted("Port"));
-                    let host = egui::TextEdit::singleline(&mut app.host)
+                    let host = theme::text_edit_single(&mut app.host)
                         .desired_width(140.0)
-                        .hint_text("hôte")
-                        .text_color(palette::text());
+                        .hint_text("hôte");
                     if ui.add(host).lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         app.reconnect();
                     }
@@ -134,7 +150,7 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
         });
 }
 
-/// Contrôles start/stop/restart du process local (redémarrage simple si le port change).
+/// Cycle de vie du process local ferredis-server (séparé de Connecter/Déconnecter).
 fn server_controls(app: &mut App, ui: &mut egui::Ui) {
     let running = app.server.is_running();
     let needs_restart = app.server_needs_restart();
@@ -159,7 +175,7 @@ fn server_controls(app: &mut App, ui: &mut egui::Ui) {
         }
     } else if ui
         .add(theme::ghost_button("Démarrer"))
-        .on_hover_text("Lance ferredis-server sur l'hôte/port courants")
+        .on_hover_text("Lance ferredis-server sur l'hôte/port courants, puis connecte")
         .clicked()
     {
         app.start_server();
@@ -183,10 +199,11 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                     (None, Some(s)) => {
                         let version = s.info("redis_version").unwrap_or("?");
                         ui.label(muted(format!(
-                            "{}:{}  ·  Redis {}  ·  {} ms  ·  {} clé(s)",
+                            "{}:{}  ·  Redis {}  ·  db{}  ·  {} ms  ·  {} clé(s)",
                             app.host,
                             app.port,
                             version,
+                            s.db,
                             s.rtt.as_millis(),
                             s.dbsize
                         )));
@@ -226,7 +243,7 @@ pub fn tab_bar(app: &mut App, ui: &mut egui::Ui) {
         for (tab, label) in Tab::ALL {
             let label = match (tab, &app.snapshot) {
                 (Tab::Clients, Some(s)) => format!("{label} ({})", s.clients.len()),
-                (Tab::Keys, Some(s)) => format!("{label} ({})", s.dbsize),
+                (Tab::Keys, Some(s)) => format!("{label} · db{} ({})", s.db, s.dbsize),
                 _ => label.to_string(),
             };
             if theme::tab(ui, app.tab == tab, &label).clicked() {
@@ -247,7 +264,7 @@ pub fn tab_bar(app: &mut App, ui: &mut egui::Ui) {
 // ───────────────────────────── Aperçu ─────────────────────────────
 
 pub fn overview(app: &mut App, ui: &mut egui::Ui) {
-    let Some(s) = &app.snapshot else {
+    let Some(s) = app.snapshot.clone() else {
         return empty_state(
             ui,
             "En attente du serveur...",
@@ -255,16 +272,14 @@ pub fn overview(app: &mut App, ui: &mut egui::Ui) {
         );
     };
 
-    let get = |k: &str| {
-        s.info(k)
-            .unwrap_or(crate::textutil::MISSING)
-            .to_string()
-    };
+    let get = |k: &str| s.info(k).unwrap_or(crate::textutil::MISSING).to_string();
     let uptime = s
         .info("uptime_in_seconds")
         .and_then(|v| v.parse().ok())
         .map(human_duration)
         .unwrap_or_else(|| crate::textutil::MISSING.into());
+    let selected_db = app.selected_db;
+    let mut open_db: Option<u16> = None;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -338,28 +353,39 @@ pub fn overview(app: &mut App, ui: &mut egui::Ui) {
                 theme::card().show(&mut cols[0], |ui| {
                     section_title(ui, "Keyspace");
                     ui.add_space(8.0);
-                    let dbs: Vec<&(String, String)> = s
-                        .info
-                        .iter()
-                        .filter(|(k, _)| {
-                            k.starts_with("db") && k[2..].chars().all(|c| c.is_ascii_digit())
-                        })
-                        .collect();
-                    if dbs.is_empty() {
+                    if s.databases.is_empty() {
                         ui.label(muted("Aucune base ne contient de clés."));
                     }
                     egui::Grid::new("keyspace")
                         .num_columns(2)
                         .spacing([28.0, 8.0])
                         .show(ui, |ui| {
-                            for (db, stats) in dbs {
+                            for db in &s.databases {
+                                let label = format!("db{}", db.index);
+                                let selected = selected_db == db.index;
+                                let name = RichText::new(&label)
+                                    .monospace()
+                                    .color(if selected {
+                                        palette::accent()
+                                    } else {
+                                        palette::text()
+                                    })
+                                    .strong();
+                                if ui
+                                    .selectable_label(selected, name)
+                                    .on_hover_text("Ouvrir cette base dans l'onglet Clés")
+                                    .clicked()
+                                {
+                                    open_db = Some(db.index);
+                                }
                                 ui.label(
-                                    RichText::new(db)
-                                        .monospace()
-                                        .color(palette::accent())
-                                        .strong(),
+                                    RichText::new(format!(
+                                        "keys={},expires={}",
+                                        db.keys, db.expires
+                                    ))
+                                    .monospace()
+                                    .color(palette::text()),
                                 );
-                                ui.label(RichText::new(stats).monospace().color(palette::text()));
                                 ui.end_row();
                             }
                         });
@@ -385,6 +411,11 @@ pub fn overview(app: &mut App, ui: &mut egui::Ui) {
                 });
             });
         });
+
+    if let Some(db) = open_db {
+        app.select_db(db);
+        app.tab = Tab::Keys;
+    }
 }
 
 // ───────────────────────────── Clés ─────────────────────────────
@@ -392,6 +423,7 @@ pub fn overview(app: &mut App, ui: &mut egui::Ui) {
 pub fn keys(app: &mut App, ui: &mut egui::Ui) {
     let mut refresh = false;
     let mut to_inspect: Option<String> = None;
+    let mut switch_db: Option<u16> = None;
 
     egui::SidePanel::left("keys_list")
         .resizable(true)
@@ -405,24 +437,27 @@ pub fn keys(app: &mut App, ui: &mut egui::Ui) {
                 .inner_margin(egui::Margin::same(12)),
         )
         .show_inside(ui, |ui| {
+            db_selector(app, ui, &mut switch_db);
+            ui.add_space(8.0);
             let resp = ui.add(
-                egui::TextEdit::singleline(&mut app.key_filter)
+                theme::text_edit_single(&mut app.key_filter)
                     .hint_text("Filtrer : texte ou motif glob (user:*)")
-                    .desired_width(f32::INFINITY)
-                    .text_color(palette::text()),
+                    .desired_width(f32::INFINITY),
             );
             if resp.changed() {
                 refresh = true;
             }
-            let (count, truncated) = app
+            let (count, truncated, db) = app
                 .snapshot
                 .as_ref()
-                .map_or((0, false), |s| (s.keys.len(), s.truncated));
+                .map_or((0, false, app.selected_db), |s| {
+                    (s.keys.len(), s.truncated, s.db)
+                });
             ui.add_space(4.0);
             ui.label(muted(if truncated {
-                format!("{count} clés affichées (limite {KEY_LIMIT}) - affine le filtre")
+                format!("db{db} · {count} clés (limite {KEY_LIMIT}) — affine le filtre")
             } else {
-                format!("{count} clé(s)")
+                format!("db{db} · {count} clé(s)")
             }));
             ui.add_space(4.0);
 
@@ -475,12 +510,44 @@ pub fn keys(app: &mut App, ui: &mut egui::Ui) {
         }))
         .show_inside(ui, |ui| detail_panel(app, ui));
 
+    if let Some(db) = switch_db {
+        app.select_db(db);
+    }
     if let Some(k) = to_inspect {
         app.inspect(&k);
     }
     if refresh {
         app.refresh();
     }
+}
+
+/// Pastilles des bases actives ; la sélection déclenche un SELECT + refresh.
+fn db_selector(app: &App, ui: &mut egui::Ui, switch_db: &mut Option<u16>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(muted("Base"));
+        let dbs = app
+            .snapshot
+            .as_ref()
+            .map(|s| s.databases.as_slice())
+            .unwrap_or(&[]);
+        if dbs.is_empty() {
+            let label = format!("db{}", app.selected_db);
+            let _ = theme::tab(ui, true, &label);
+            return;
+        }
+        for db in dbs {
+            let selected = app.selected_db == db.index;
+            let label = if db.expires > 0 {
+                format!("db{} · {} (ttl {})", db.index, db.keys, db.expires)
+            } else {
+                format!("db{} · {}", db.index, db.keys)
+            };
+            if theme::tab(ui, selected, &label).clicked() && !selected {
+                *switch_db = Some(db.index);
+            }
+        }
+    });
 }
 
 fn detail_panel(app: &mut App, ui: &mut egui::Ui) {
@@ -798,11 +865,10 @@ pub fn console(app: &mut App, ui: &mut egui::Ui) {
                     .size(18.0),
             );
             let resp = ui.add(
-                egui::TextEdit::singleline(&mut app.console_input)
+                theme::text_edit_single(&mut app.console_input)
                     .font(egui::TextStyle::Monospace)
                     .hint_text("Commande...")
                     .desired_width(ui.available_width() - 100.0)
-                    .text_color(palette::text())
                     .frame(false),
             );
             if resp.has_focus() && !app.history.is_empty() {
@@ -929,7 +995,7 @@ pub fn cluster(app: &mut App, ui: &mut egui::Ui) {
         return empty_state(ui, "Pas de snapshot", "Connecte-toi au serveur.");
     };
     theme::card().show(ui, |ui| {
-        ui.label(RichText::new("Cluster").strong().size(16.0));
+        section_title(ui, "Cluster");
         ui.add_space(8.0);
         info_kv(
             ui,
@@ -957,7 +1023,7 @@ pub fn replica(app: &mut App, ui: &mut egui::Ui) {
         return empty_state(ui, "Pas de snapshot", "Connecte-toi au serveur.");
     };
     theme::card().show(ui, |ui| {
-        ui.label(RichText::new("Réplication").strong().size(16.0));
+        section_title(ui, "Réplication");
         ui.add_space(8.0);
         info_kv(
             ui,
@@ -981,7 +1047,7 @@ pub fn acl(app: &mut App, ui: &mut egui::Ui) {
         return empty_state(ui, "Pas de snapshot", "Connecte-toi au serveur.");
     };
     theme::card().show(ui, |ui| {
-        ui.label(RichText::new("ACL").strong().size(16.0));
+        section_title(ui, "ACL");
         ui.add_space(8.0);
         info_kv(
             ui,

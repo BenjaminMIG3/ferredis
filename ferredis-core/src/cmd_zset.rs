@@ -516,12 +516,12 @@ impl Aggregate {
     }
 }
 
-/// Source d'une opération ensembliste : zset, set (score 1) ou clé absente — empruntée, jamais copiée.
-#[derive(Clone, Copy)]
+/// Source d'une opération ensembliste : zset, set (score 1) ou clé absente.
 enum ZSource<'a> {
     Empty,
     Z(&'a ZSet),
-    S(&'a HashSet<Bytes>),
+    /// Copie owned (intset → hashtable) pour itérer des `&Bytes` stables.
+    S(HashSet<Bytes>),
 }
 
 impl<'a> ZSource<'a> {
@@ -541,8 +541,8 @@ impl<'a> ZSource<'a> {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = (&'a Bytes, f64)> + 'a> {
-        match *self {
+    fn iter(&self) -> Box<dyn Iterator<Item = (&Bytes, f64)> + '_> {
+        match self {
             Self::Empty => Box::new(std::iter::empty()),
             Self::Z(z) => Box::new(z.members.iter().map(|(m, s)| (m, *s))),
             Self::S(s) => Box::new(s.iter().map(|m| (m, 1.0))),
@@ -560,7 +560,7 @@ fn load_sources<'a>(d: &'a mut DbInner, keys: &[Bytes]) -> Result<Vec<ZSource<'a
         .map(|k| match d.map.get(k).map(|e| &e.value) {
             None => Ok(ZSource::Empty),
             Some(RedisValue::ZSet(z)) => Ok(ZSource::Z(z)),
-            Some(RedisValue::Set(s)) => Ok(ZSource::S(s)),
+            Some(RedisValue::Set(s)) => Ok(ZSource::S(s.as_hashset())),
             Some(_) => Err(WRONGTYPE),
         })
         .collect()

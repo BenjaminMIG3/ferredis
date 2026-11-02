@@ -126,7 +126,7 @@ fn read_entry(data: &[u8], i: &mut usize) -> Result<Entry> {
             for _ in 0..n {
                 s.insert(read_bytes(data, i)?);
             }
-            RedisValue::Set(s)
+            RedisValue::Set(s.into())
         }
         5 => {
             let n = read_u32(data, i)? as usize;

@@ -1,7 +1,7 @@
 use clap::Parser;
 use ferredis_core::conf::load_optional_conf;
+use ferredis_core::server::resolve_listen_addrs;
 use ferredis_core::{FerredisServer, PersistConfig, ServerConfig};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -146,13 +146,19 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("TLS cert set but tls-port=0 — no TLS listener (set --tls-port)");
     }
 
-    let bind = config
-        .bind
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".into());
-    let addr: SocketAddr = format!("{bind}:{}", config.port).parse()?;
+    let addrs = resolve_listen_addrs(&config).map_err(anyhow::Error::msg)?;
     let server = FerredisServer::new(config);
-    server.serve(addr).await?;
+    let ctrl = server.context().config.read().control.clone();
+    tokio::spawn(async move {
+        // Ctrl+C / SIGINT → SHUTDOWN avec persistance (parité redis-server).
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("signal: initiating SHUTDOWN SAVE");
+            ctrl.request_shutdown(ferredis_core::control::ShutdownRequest {
+                save: true,
+                ..Default::default()
+            });
+        }
+    });
+    server.serve_addrs(&addrs).await?;
     Ok(())
 }

@@ -178,9 +178,9 @@ pub(crate) fn cmd_sscan(ctx: &CommandContext, state: &ClientState, args: &[Bytes
             return Ok(Vec::new());
         };
         let mut items: Vec<Bytes> = s
-            .iter()
+            .iter_members()
+            .into_iter()
             .filter(|m| pattern.as_deref().map_or(true, |p| match_glob_bytes(p.as_bytes(), m)))
-            .cloned()
             .collect();
         items.sort_unstable();
         Ok(items)
@@ -214,7 +214,10 @@ pub(crate) fn cmd_spop(ctx: &CommandContext, state: &ClientState, args: &[Bytes]
             return Ok(Vec::new());
         };
         let n = count.unwrap_or(1).min(s.len());
-        let chosen: Vec<Bytes> = s.iter().cloned().choose_multiple(&mut rand::thread_rng(), n);
+        let chosen: Vec<Bytes> = s
+            .iter_members()
+            .into_iter()
+            .choose_multiple(&mut rand::thread_rng(), n);
         for m in &chosen {
             s.remove(m);
         }
@@ -261,10 +264,20 @@ pub(crate) fn cmd_srandmember(ctx: &CommandContext, state: &mut ClientState, arg
         Ok(match (s, count) {
             (None, None) => RespValue::null_bulk(),
             (None, Some(_)) => RespValue::array(vec![]),
-            (Some(s), None) => random_sample(s.iter(), s.len(), 1)
-                .first()
-                .map_or_else(RespValue::null_bulk, |m| RespValue::bulk((*m).clone())),
-            (Some(s), Some(n)) => bulk_array(random_sample(s.iter(), s.len(), n).into_iter().cloned()),
+            (Some(s), None) => {
+                let members = s.iter_members();
+                random_sample(members.iter(), members.len(), 1)
+                    .first()
+                    .map_or_else(RespValue::null_bulk, |m| RespValue::bulk((*m).clone()))
+            }
+            (Some(s), Some(n)) => {
+                let members = s.iter_members();
+                bulk_array(
+                    random_sample(members.iter(), members.len(), n)
+                        .into_iter()
+                        .cloned(),
+                )
+            }
         })
     });
     reply(r)
@@ -289,12 +302,12 @@ pub(crate) fn cmd_sintercard(ctx: &CommandContext, state: &mut ClientState, args
         for k in keys {
             d.purge_if_expired(k);
         }
-        let mut sets: Vec<&HashSet<Bytes>> = Vec::with_capacity(numkeys);
+        let mut sets: Vec<HashSet<Bytes>> = Vec::with_capacity(numkeys);
         let mut missing = false;
         for k in keys {
             match d.map.get(k).map(|e| &e.value) {
                 None => missing = true,
-                Some(RedisValue::Set(s)) => sets.push(s),
+                Some(RedisValue::Set(s)) => sets.push(s.as_hashset()),
                 Some(_) => return Err(WRONGTYPE),
             }
         }
@@ -430,7 +443,7 @@ pub(crate) fn cmd_setstore(ctx: &CommandContext, state: &ClientState, args: &[By
             sets.push(match d.get_fresh(key) {
                 None => HashSet::new(),
                 Some(e) => match &e.value {
-                    RedisValue::Set(s) => s.clone(),
+                    RedisValue::Set(s) => s.as_hashset(),
                     _ => return Err(WRONGTYPE),
                 },
             });
@@ -460,7 +473,7 @@ pub(crate) fn cmd_setstore(ctx: &CommandContext, state: &ClientState, args: &[By
         d.map.remove(&args[1]);
         if !result.is_empty() {
             d.map
-                .insert(args[1].clone(), Entry::new(RedisValue::Set(result)));
+                .insert(args[1].clone(), Entry::new(RedisValue::Set(result.into())));
         }
         Ok(len)
     });

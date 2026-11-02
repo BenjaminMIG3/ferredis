@@ -182,7 +182,7 @@ fn dump_payload_types_unit() {
     for v in [
         RedisValue::String(Bytes::from_static(b"s")),
         RedisValue::List(VecDeque::from([Bytes::from_static(b"1")])),
-        RedisValue::Set(HashSet::from([Bytes::from_static(b"m")])),
+        RedisValue::Set(HashSet::from([Bytes::from_static(b"m")]).into()),
         RedisValue::Hash(h),
         RedisValue::Stream(stream),
     ] {

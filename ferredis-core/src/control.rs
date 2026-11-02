@@ -13,6 +13,17 @@ pub struct ShutdownRequest {
     pub abort: bool,
 }
 
+impl ShutdownRequest {
+    /// Parité Redis : persister sauf `NOSAVE` explicite.
+    ///
+    /// Redis sauvegarde par défaut si des save points / AOF sont actifs ;
+    /// Ferredis a toujours l'autosave RDB → défaut = save.
+    #[inline]
+    pub fn should_persist(&self) -> bool {
+        !self.nosave
+    }
+}
+
 #[derive(Debug)]
 pub struct ServerControl {
     shutdown_tx: watch::Sender<bool>,

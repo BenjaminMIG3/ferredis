@@ -12,31 +12,30 @@ use crate::acl::{self, shared_acl, SharedAcl};
 use crate::async_drop::SharedAsyncDrop;
 use crate::blocking;
 use crate::clients::{ClientInfo, ClientRegistry, SharedClients};
-use crate::command_matrix::deferred_error;
-use crate::command_registry;
-use crate::control::SharedControl;
-use crate::functions::{shared_functions, SharedFunctions};
-use crate::search::{shared_search, SharedSearch};
-use crate::latency::SharedLatency;
-use crate::monitor::{format_monitor_line, SharedMonitor};
-use crate::opts::{trailing_sync_mode, SyncMode};
-use crate::slowlog::SharedSlowLog;
-use crate::stats::SharedStats;
 use crate::cmd_hashset as hashset;
 use crate::cmd_key as key;
 use crate::cmd_list as list;
+pub use crate::cmd_pubsub::format_pubsub_event;
 use crate::cmd_server as server;
 use crate::cmd_string as string;
+use crate::command_matrix::deferred_error;
+use crate::command_registry;
 use crate::commands_extra as extra;
+use crate::control::SharedControl;
+use crate::functions::{shared_functions, SharedFunctions};
+use crate::latency::SharedLatency;
+use crate::monitor::{format_monitor_line, SharedMonitor};
+use crate::opts::{trailing_sync_mode, SyncMode};
 use crate::persist::{AofLogger, PersistConfig, SharedAof};
 use crate::pubsub::{shared_pubsub, SharedPubSub};
-pub use crate::cmd_pubsub::format_pubsub_event;
 use crate::resp::RespValue;
 use crate::script::{shared_scripts, SharedScripts};
+use crate::search::{shared_search, SharedSearch};
+use crate::slowlog::SharedSlowLog;
+use crate::stats::SharedStats;
 use crate::store::{shared_db, ListWaiters, SharedDb, SharedWaiters};
 use crate::tracking::{shared_tracking, SharedTracking};
 use crate::util::ERR_INT;
-use crate::value::Entry;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::path::PathBuf;
@@ -71,7 +70,19 @@ pub struct ServerConfig {
     pub tcp_keepalive: u64,
     pub hz: u64,
     pub maxmemory: u64,
+    /// Soft limit : déclenche compression / demote avant OOM (0 = désactivé).
+    pub maxmemory_soft: u64,
     pub maxmemory_policy: String,
+    /// Seuil octets pour compression LZ4 transparente (0 = off).
+    pub compress_threshold: u64,
+    /// Active defrag périodique.
+    pub activedefrag: bool,
+    /// `memory` | `hybrid`.
+    pub storage_mode: String,
+    /// Durée group-commit AOF (ms, 0 = immédiat selon appendfsync).
+    pub aof_group_commit_ms: u64,
+    /// `ap` | `cp` (Raft quorum writes).
+    pub cluster_consistency: String,
     pub save_lines: Vec<String>,
     pub conf_path: Option<PathBuf>,
     pub stats: SharedStats,
@@ -117,7 +128,13 @@ impl Default for ServerConfig {
             tcp_keepalive: 300,
             hz: 10,
             maxmemory: 0,
+            maxmemory_soft: 0,
             maxmemory_policy: "noeviction".into(),
+            compress_threshold: 128,
+            activedefrag: false,
+            storage_mode: "memory".into(),
+            aof_group_commit_ms: 0,
+            cluster_consistency: "ap".into(),
             save_lines: Vec::new(),
             conf_path: None,
             stats: crate::stats::shared_stats(),
@@ -138,12 +155,17 @@ impl Default for ServerConfig {
     }
 }
 
-/// Clé surveillée par WATCH : état de la clé au moment du WATCH.
+/// Clé surveillée par WATCH : identité d'écriture au moment du WATCH.
+///
+/// On stocke uniquement `version` (pas l'`Entry` complète) : Redis invalide WATCH
+/// sur **écriture**, pas sur lecture LRU/LFU. Comparer l'`Entry` entière faisait
+/// échouer EXEC après un simple `get_fresh` (mutation de `last_access`).
 #[derive(Debug, Clone)]
 pub struct WatchedKey {
     pub db: usize,
     pub key: Bytes,
-    pub snapshot: Option<Entry>,
+    /// `None` si la clé n'existait pas ; sinon [`Entry::version`] au WATCH.
+    pub version: Option<u64>,
 }
 
 /// Mode CLIENT REPLY.
@@ -191,6 +213,39 @@ pub struct ClientState {
     pub repl_capa: Vec<String>,
     /// Flag ASKING (une commande, cluster migration).
     pub asking: bool,
+    /// CLIENT DURABILITY : none | everysec | always | quorum.
+    pub durability: DurabilityMode,
+}
+
+/// Niveau de durabilité demandé par le client (phase F3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DurabilityMode {
+    #[default]
+    None,
+    Everysec,
+    Always,
+    Quorum,
+}
+
+impl DurabilityMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "everysec" => Some(Self::Everysec),
+            "always" => Some(Self::Always),
+            "quorum" => Some(Self::Quorum),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Everysec => "everysec",
+            Self::Always => "always",
+            Self::Quorum => "quorum",
+        }
+    }
 }
 
 impl Default for ClientState {
@@ -219,6 +274,7 @@ impl Default for ClientState {
             repl_listening_port: 0,
             repl_capa: Vec::new(),
             asking: false,
+            durability: DurabilityMode::None,
         }
     }
 }
@@ -252,6 +308,10 @@ pub struct CommandContext {
     pub repl: crate::repl::SharedRepl,
     pub sentinel: crate::sentinel::SharedSentinel,
     pub cluster: crate::cluster::SharedCluster,
+    pub query: crate::query::SharedQuery,
+    pub storage: crate::storage::SharedStorage,
+    pub raft: crate::raft::SharedRaft,
+    pub defrag: std::sync::Arc<crate::mem::DefragStats>,
 }
 
 impl CommandContext {
@@ -283,15 +343,53 @@ impl CommandContext {
             repl: crate::repl::shared_repl(),
             sentinel: crate::sentinel::shared_sentinel(),
             cluster: crate::cluster::shared_cluster(),
+            query: crate::query::shared_query(),
+            storage: {
+                let s = crate::storage::StorageEngine::new();
+                s.set_mode(crate::storage::StorageMode::parse(&config.storage_mode));
+                s.compress_threshold.store(
+                    config.compress_threshold,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                s
+            },
+            raft: {
+                let r = crate::raft::shared_raft(config.run_id.clone());
+                r.set_consistency(crate::raft::ClusterConsistency::parse(
+                    &config.cluster_consistency,
+                ));
+                r
+            },
+            defrag: std::sync::Arc::new(crate::mem::DefragStats::default()),
             config: Arc::new(RwLock::new(config)),
         }
     }
 
     /// Propage une écriture vers AOF + réplicas (DRY avec les sites d'append).
     pub fn propagate(&self, args: &[Bytes]) {
+        if self.raft.is_cp() {
+            let _ = self.raft.commit_write(std::time::Duration::from_millis(50));
+        }
         self.aof.append_command(args);
         if !self.repl.is_replica() {
             self.repl.feed_command(args);
+        }
+    }
+
+    /// Applique la durabilité client après une écriture (CLIENT DURABILITY).
+    pub fn apply_durability(&self, state: &ClientState) {
+        match state.durability {
+            DurabilityMode::None => {}
+            DurabilityMode::Everysec => {
+                // everysec : déjà couvert par la politique AOF ; rien de synchrone.
+            }
+            DurabilityMode::Always => {
+                let _ = self.aof.fsync_now();
+            }
+            DurabilityMode::Quorum => {
+                let _ = self.raft.commit_write(std::time::Duration::from_millis(200));
+                let _ = self.aof.fsync_now();
+            }
         }
     }
 
@@ -304,7 +402,10 @@ impl CommandContext {
         let keyspace = flags.contains('K') || flags.contains('A');
         let keyevent = flags.contains('E') || flags.contains('A');
         if keyspace {
-            let ch = Bytes::from(format!("__keyspace@{db}__:{}", String::from_utf8_lossy(key)));
+            let ch = Bytes::from(format!(
+                "__keyspace@{db}__:{}",
+                String::from_utf8_lossy(key)
+            ));
             self.pubsub.publish(&ch, Bytes::from(event.to_string()));
         }
         if keyevent {
@@ -359,9 +460,7 @@ fn admission(ctx: &CommandContext, state: &ClientState, cmd: &str) -> Option<Res
             cmd.to_ascii_lowercase()
         )));
     }
-    if state.monitor_rx.is_some()
-        && !matches!(cmd, "PING" | "QUIT")
-    {
+    if state.monitor_rx.is_some() && !matches!(cmd, "PING" | "QUIT") {
         return Some(RespValue::err(
             "ERR MONITOR mode: only PING and QUIT are allowed",
         ));
@@ -396,7 +495,10 @@ pub async fn dispatch(
         let keys = acl::keys_for_command(&cmd, args);
         let chans = acl::channels_for_command(&cmd, args);
         let addr = state.info.as_ref().map(|i| i.addr.as_str()).unwrap_or("?");
-        if let Err(e) = ctx.acl.check_command(&state.acl_user, &cmd, &keys, &chans, addr) {
+        if let Err(e) = ctx
+            .acl
+            .check_command(&state.acl_user, &cmd, &keys, &chans, addr)
+        {
             return vec![RespValue::err(e)];
         }
     }
@@ -513,24 +615,11 @@ fn apply_reply_mode(state: &mut ClientState, out: Vec<RespValue>) -> Vec<RespVal
     }
 }
 
-fn record_post_exec(
-    ctx: &CommandContext,
-    state: &ClientState,
-    args: &[Bytes],
-    started: Instant,
-) {
+fn record_post_exec(ctx: &CommandContext, state: &ClientState, args: &[Bytes], started: Instant) {
     let dur = started.elapsed();
     let us = dur.as_micros() as u64;
-    let addr = state
-        .info
-        .as_ref()
-        .map(|i| i.addr.as_str())
-        .unwrap_or("?");
-    let name = state
-        .info
-        .as_ref()
-        .map(|i| i.name())
-        .unwrap_or_default();
+    let addr = state.info.as_ref().map(|i| i.addr.as_str()).unwrap_or("?");
+    let name = state.info.as_ref().map(|i| i.name()).unwrap_or_default();
     let cmd_name = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
     let cfg = ctx.config.read();
     cfg.slowlog.maybe_record(us, args, addr, &name);
@@ -623,7 +712,10 @@ fn exec_transaction(ctx: &CommandContext, state: &mut ClientState) -> RespValue 
 
 /// Erreur Redis d'une commande inconnue.
 fn unknown_command(cmd: &str, args: &[Bytes]) -> RespValue {
-    let name: String = String::from_utf8_lossy(&args[0]).chars().take(128).collect();
+    let name: String = String::from_utf8_lossy(&args[0])
+        .chars()
+        .take(128)
+        .collect();
     let mut tail = String::new();
     for a in args.iter().skip(1) {
         if tail.len() >= 128 {
@@ -631,7 +723,13 @@ fn unknown_command(cmd: &str, args: &[Bytes]) -> RespValue {
         }
         let room = 128 - tail.len();
         let s = String::from_utf8_lossy(a);
-        let cut = s.char_indices().map(|(i, _)| i).chain([s.len()]).take_while(|&i| i <= room).last().unwrap_or(0);
+        let cut = s
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([s.len()])
+            .take_while(|&i| i <= room)
+            .last()
+            .unwrap_or(0);
         tail.push_str(&format!("'{}' ", &s[..cut]));
     }
     let msg = format!("ERR unknown command '{name}', with args beginning with: {tail}");
@@ -719,7 +817,12 @@ pub(crate) fn execute(
         "SHUTDOWN" => vec![server::cmd_shutdown(ctx, args)],
         "LOLWUT" => vec![server::cmd_lolwut(args)],
         "MEMORY" => vec![server::cmd_memory(ctx, state, args)],
+        "FQ.SELECT" | "FQ.INDEX" | "FQ.DROPINDEX" | "FQ.LIST" => {
+            vec![crate::cmd_query::cmd_fq(ctx, state, args)]
+        }
+        "INDEX" => vec![crate::cmd_query::cmd_index(ctx, state, args)],
         "FERREDIS" => vec![server::cmd_ferredis(ctx, args)],
+        "DATABASES" => vec![server::cmd_databases(ctx, state, args)],
         "TIME" => vec![cmd_time()],
         "ACL" => vec![acl::cmd_acl(ctx, state, args)],
         "DBSIZE" => vec![RespValue::Integer(ctx.db.dbsize(state.db_index))],
@@ -756,10 +859,42 @@ pub(crate) fn execute(
         "TYPE" => vec![cmd_type(ctx, state, args)],
         "TTL" => vec![cmd_ttl(ctx, state, args)],
         "PTTL" => vec![cmd_pttl(ctx, state, args)],
-        "EXPIRE" => vec![key::cmd_expire(ctx, state, args, key::ExpireMode { millis: false, absolute: false })],
-        "PEXPIRE" => vec![key::cmd_expire(ctx, state, args, key::ExpireMode { millis: true, absolute: false })],
-        "EXPIREAT" => vec![key::cmd_expire(ctx, state, args, key::ExpireMode { millis: false, absolute: true })],
-        "PEXPIREAT" => vec![key::cmd_expire(ctx, state, args, key::ExpireMode { millis: true, absolute: true })],
+        "EXPIRE" => vec![key::cmd_expire(
+            ctx,
+            state,
+            args,
+            key::ExpireMode {
+                millis: false,
+                absolute: false,
+            },
+        )],
+        "PEXPIRE" => vec![key::cmd_expire(
+            ctx,
+            state,
+            args,
+            key::ExpireMode {
+                millis: true,
+                absolute: false,
+            },
+        )],
+        "EXPIREAT" => vec![key::cmd_expire(
+            ctx,
+            state,
+            args,
+            key::ExpireMode {
+                millis: false,
+                absolute: true,
+            },
+        )],
+        "PEXPIREAT" => vec![key::cmd_expire(
+            ctx,
+            state,
+            args,
+            key::ExpireMode {
+                millis: true,
+                absolute: true,
+            },
+        )],
         "EXPIRETIME" => vec![key::cmd_expiretime(ctx, state, args, false)],
         "PEXPIRETIME" => vec![key::cmd_expiretime(ctx, state, args, true)],
         "PERSIST" => vec![cmd_persist(ctx, state, args)],
@@ -844,9 +979,24 @@ pub(crate) fn execute(
         "SPOP" => vec![hashset::cmd_spop(ctx, state, args)],
         "SMOVE" => vec![hashset::cmd_smove(ctx, state, args)],
         "SMISMEMBER" => vec![hashset::cmd_smismember(ctx, state, args)],
-        "SINTERSTORE" => vec![hashset::cmd_setstore(ctx, state, args, hashset::SetOp::Inter)],
-        "SUNIONSTORE" => vec![hashset::cmd_setstore(ctx, state, args, hashset::SetOp::Union)],
-        "SDIFFSTORE" => vec![hashset::cmd_setstore(ctx, state, args, hashset::SetOp::Diff)],
+        "SINTERSTORE" => vec![hashset::cmd_setstore(
+            ctx,
+            state,
+            args,
+            hashset::SetOp::Inter,
+        )],
+        "SUNIONSTORE" => vec![hashset::cmd_setstore(
+            ctx,
+            state,
+            args,
+            hashset::SetOp::Union,
+        )],
+        "SDIFFSTORE" => vec![hashset::cmd_setstore(
+            ctx,
+            state,
+            args,
+            hashset::SetOp::Diff,
+        )],
 
         _ => vec![unknown_command(cmd, args)],
     }
@@ -1021,7 +1171,11 @@ fn cmd_incr(ctx: &CommandContext, state: &ClientState, args: &[Bytes], delta: i6
     }
     match ctx.db.incr_by(state.db_index, &args[1], delta) {
         Ok(n) => {
-            ctx.notify_key(state.db_index, &args[1], if delta > 0 { "incr" } else { "decr" });
+            ctx.notify_key(
+                state.db_index,
+                &args[1],
+                if delta > 0 { "incr" } else { "decr" },
+            );
             RespValue::Integer(n)
         }
         Err(e) => RespValue::err(e),
@@ -1145,10 +1299,7 @@ fn cmd_lpush(ctx: &CommandContext, state: &ClientState, args: &[Bytes]) -> RespV
     if args.len() < 3 {
         return wrong_arity("lpush");
     }
-    match ctx
-        .db
-        .list_push(state.db_index, &args[1], &args[2..], true)
-    {
+    match ctx.db.list_push(state.db_index, &args[1], &args[2..], true) {
         Ok(n) => {
             ctx.waiters.notify(state.db_index, &args[1]);
             ctx.notify_key(state.db_index, &args[1], "lpush");
@@ -1191,9 +1342,7 @@ fn cmd_lpop(ctx: &CommandContext, state: &ClientState, args: &[Bytes]) -> RespVa
         Ok(None) if count.is_some() => RespValue::null_array(),
         Ok(None) => RespValue::null_bulk(),
         Ok(Some(vals)) if count.is_none() => RespValue::bulk(vals.into_iter().next().unwrap()),
-        Ok(Some(vals)) => {
-            RespValue::array(vals.into_iter().map(RespValue::bulk).collect())
-        }
+        Ok(Some(vals)) => RespValue::array(vals.into_iter().map(RespValue::bulk).collect()),
         Err(e) => RespValue::err(e),
     }
 }
@@ -1214,9 +1363,7 @@ fn cmd_rpop(ctx: &CommandContext, state: &ClientState, args: &[Bytes]) -> RespVa
         Ok(None) if count.is_some() => RespValue::null_array(),
         Ok(None) => RespValue::null_bulk(),
         Ok(Some(vals)) if count.is_none() => RespValue::bulk(vals.into_iter().next().unwrap()),
-        Ok(Some(vals)) => {
-            RespValue::array(vals.into_iter().map(RespValue::bulk).collect())
-        }
+        Ok(Some(vals)) => RespValue::array(vals.into_iter().map(RespValue::bulk).collect()),
         Err(e) => RespValue::err(e),
     }
 }
