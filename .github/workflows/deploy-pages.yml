@@ -77,10 +77,13 @@ jobs:
           <p>Arch : ajoutez le dépôt puis <code>sudo pacman -Syu ferredis</code> — voir README.</p>
           </body></html>
           HTML
+          # Désactive Jekyll (sinon certains fichiers du dépôt apt/pacman peuvent être omis).
+          touch dist/.nojekyll
           ls -laR dist/
           test -f dist/ferredis-linux-x86_64.tar.gz
           test -f dist/ferredis-windows-x86_64.zip
           test -d dist/apt/dists
+          test -f dist/apt/dists/stable/main/binary-amd64/Packages
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
