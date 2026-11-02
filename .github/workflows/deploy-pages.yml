@@ -1,0 +1,79 @@
+# Déploie le site / dépôt pacman sur GitHub Pages.
+# Déclenché après un release réussi : tourne sur la branche par défaut (main),
+# ce qui respecte les règles de protection de l'environnement github-pages
+# (les tags v* sont souvent refusés directement).
+name: deploy-pages
+
+on:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event == 'push' ||
+       github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: artifacts
+
+      - name: Assemble dist/
+        run: |
+          set -euo pipefail
+          mkdir -p dist/archlinux/x86_64
+          find artifacts -type f -name 'ferredis-linux-*.tar.gz' -exec cp -f {} dist/ \;
+          find artifacts -type f -name 'ferredis-windows-*.zip' -exec cp -f {} dist/ \;
+          find artifacts -type f \( -name '*.pkg.tar.zst' -o -name '*.pkg.tar.xz' \) -exec cp -f {} dist/ \;
+          find artifacts -type f -name 'PKGBUILD' -exec cp -f {} dist/ \;
+          if [ -d artifacts/ferredis-archlinux/archlinux ]; then
+            cp -a artifacts/ferredis-archlinux/archlinux/. dist/archlinux/
+          else
+            find artifacts -type d -name x86_64 | head -1 | while read -r d; do
+              cp -a "$d"/. dist/archlinux/x86_64/ || true
+            done
+          fi
+          cat > dist/index.html << 'HTML'
+          <!DOCTYPE html>
+          <html lang="fr"><head><meta charset="utf-8"><title>Ferredis downloads</title></head>
+          <body>
+          <h1>Ferredis — téléchargements</h1>
+          <ul>
+            <li><a href="ferredis-linux-x86_64.tar.gz">Linux x86_64 (tarball + systemd)</a></li>
+            <li><a href="ferredis-windows-x86_64.zip">Windows x86_64 (zip + service)</a></li>
+            <li><a href="archlinux/x86_64/">Dépôt pacman Arch (x86_64)</a></li>
+          </ul>
+          <p>Arch : ajoutez le dépôt puis <code>sudo pacman -Syu ferredis</code> — voir README.</p>
+          </body></html>
+          HTML
+          ls -laR dist/
+          test -f dist/ferredis-linux-x86_64.tar.gz
+          test -f dist/ferredis-windows-x86_64.zip
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

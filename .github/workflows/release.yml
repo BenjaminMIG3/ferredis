@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -85,7 +83,6 @@ jobs:
           find artifacts -type f -name 'ferredis-windows-*.zip' -exec cp -f {} dist/ \;
           find artifacts -type f \( -name '*.pkg.tar.zst' -o -name '*.pkg.tar.xz' \) -exec cp -f {} dist/ \;
           find artifacts -type f -name 'PKGBUILD' -exec cp -f {} dist/ \;
-          # Copie arbo dépôt pacman si présente
           if [ -d artifacts/ferredis-archlinux/archlinux ]; then
             cp -a artifacts/ferredis-archlinux/archlinux/. dist/archlinux/
           else
@@ -93,20 +90,6 @@ jobs:
               cp -a "$d"/. dist/archlinux/x86_64/ || true
             done
           fi
-          # Index HTML simple pour navigation / téléchargements
-          cat > dist/index.html << 'HTML'
-          <!DOCTYPE html>
-          <html lang="fr"><head><meta charset="utf-8"><title>Ferredis downloads</title></head>
-          <body>
-          <h1>Ferredis — téléchargements</h1>
-          <ul>
-            <li><a href="ferredis-linux-x86_64.tar.gz">Linux x86_64 (tarball + systemd)</a></li>
-            <li><a href="ferredis-windows-x86_64.zip">Windows x86_64 (zip + service)</a></li>
-            <li><a href="archlinux/x86_64/">Dépôt pacman Arch (x86_64)</a></li>
-          </ul>
-          <p>Arch : ajoutez le dépôt puis <code>sudo pacman -Syu ferredis</code> — voir README.</p>
-          </body></html>
-          HTML
           ls -laR dist/
       - name: Upload GitHub Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -121,18 +104,9 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      # Conserve les artefacts du run pour le workflow deploy-pages (workflow_run).
+      - name: Upload site bundle for Pages
+        uses: actions/upload-artifact@v4
         with:
-          path: dist
-
-  deploy-pages:
-    needs: release
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          name: ferredis-pages-dist
+          path: dist/
