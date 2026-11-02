@@ -10,6 +10,7 @@ Compatible Linux et Windows.
 |---|---|
 | **Releases GitHub** | [Releases](https://github.com/BenjaminMIG3/ferredis/releases) (Linux `.tar.gz`, Windows `.zip`, Arch `.pkg.tar.zst`) |
 | **Site artefacts / dépôt pacman** | [GitHub Pages](https://benjaminmig3.github.io/ferredis/) |
+| **Windows (Scoop)** | `scoop bucket add ferredis https://github.com/BenjaminMIG3/ferredis` puis `scoop install ferredis` |
 
 ### Arch Linux — `pacman -S ferredis`
 
@@ -34,10 +35,22 @@ sudo ./install.sh --from-dir . --enable --start
 sudo systemctl status ferredis
 ```
 
-### Windows
+### Windows — Scoop (recommandé, sans admin)
 
 ```powershell
-# Depuis ferredis-windows-x86_64.zip (PowerShell Admin)
+# Prérequis : https://scoop.sh
+scoop bucket add ferredis https://github.com/BenjaminMIG3/ferredis
+scoop install ferredis
+ferredis-server
+ferredis-cli PING
+# Mise à jour
+scoop update ferredis
+```
+
+### Windows — zip / service
+
+```powershell
+# Depuis ferredis-windows-x86_64.zip (PowerShell Admin pour le service)
 .\install-service.ps1 -Start
 Get-Service Ferredis
 ```
